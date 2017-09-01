@@ -1109,9 +1109,9 @@ void AppendExceptionLine(Environment* env,
 }
 
 
-static void ReportException(Environment* env,
-                            Local<Value> er,
-                            Local<Message> message) {
+void ReportException(Environment* env,
+                     Local<Value> er,
+                     Local<Message> message) {
   CHECK(!er.IsEmpty());
   HandleScope scope(env->isolate());
 
@@ -1198,9 +1198,9 @@ static void ReportException(Environment* env, const TryCatch& try_catch) {
 
 
 // Executes a str within the current v8 context.
-static Local<Value> ExecuteString(Environment* env,
-                                  Local<String> source,
-                                  Local<String> filename) {
+static MaybeLocal<Value> ExecuteString(Environment* env,
+                                       Local<String> source,
+                                       Local<String> filename) {
   EscapableHandleScope scope(env->isolate());
   TryCatch try_catch(env->isolate());
 
@@ -1213,13 +1213,19 @@ static Local<Value> ExecuteString(Environment* env,
       v8::Script::Compile(env->context(), source, &origin);
   if (script.IsEmpty()) {
     ReportException(env, try_catch);
-    exit(3);
+    env->Exit(3);
+    return MaybeLocal<Value>();
   }
 
   MaybeLocal<Value> result = script.ToLocalChecked()->Run(env->context());
   if (result.IsEmpty()) {
+    if (try_catch.HasTerminated()) {
+      env->isolate()->CancelTerminateExecution();
+      return MaybeLocal<Value>();
+    }
     ReportException(env, try_catch);
-    exit(4);
+    env->Exit(4);
+    return MaybeLocal<Value>();
   }
 
   return scope.Escape(result.ToLocalChecked());
@@ -1318,6 +1324,7 @@ static void Abort(const FunctionCallbackInfo<Value>& args) {
 
 static void Chdir(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
+  CHECK(env->is_main_thread());
 
   CHECK_EQ(args.Length(), 1);
   CHECK(args[0]->IsString());
@@ -1499,6 +1506,7 @@ static void GetEGid(const FunctionCallbackInfo<Value>& args) {
 
 static void SetGid(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
+  CHECK(env->is_main_thread());
 
   CHECK_EQ(args.Length(), 1);
   CHECK(args[0]->IsUint32() || args[0]->IsString());
@@ -1518,6 +1526,7 @@ static void SetGid(const FunctionCallbackInfo<Value>& args) {
 
 static void SetEGid(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
+  CHECK(env->is_main_thread());
 
   CHECK_EQ(args.Length(), 1);
   CHECK(args[0]->IsUint32() || args[0]->IsString());
@@ -1537,6 +1546,7 @@ static void SetEGid(const FunctionCallbackInfo<Value>& args) {
 
 static void SetUid(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
+  CHECK(env->is_main_thread());
 
   CHECK_EQ(args.Length(), 1);
   CHECK(args[0]->IsUint32() || args[0]->IsString());
@@ -1556,6 +1566,7 @@ static void SetUid(const FunctionCallbackInfo<Value>& args) {
 
 static void SetEUid(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
+  CHECK(env->is_main_thread());
 
   CHECK_EQ(args.Length(), 1);
   CHECK(args[0]->IsUint32() || args[0]->IsString());
@@ -1717,9 +1728,10 @@ static void WaitForInspectorDisconnect(Environment* env) {
 
 
 static void Exit(const FunctionCallbackInfo<Value>& args) {
-  WaitForInspectorDisconnect(Environment::GetCurrent(args));
+  Environment* env = Environment::GetCurrent(args);
+  WaitForInspectorDisconnect(env);
   v8_platform.StopTracingAgent();
-  exit(args[0]->Int32Value());
+  env->Exit(args[0]->Int32Value());
 }
 
 
@@ -2128,6 +2140,9 @@ void FatalException(Isolate* isolate,
     Local<Value> caught =
         fatal_exception_function->Call(process_object, 1, &error);
 
+    if (fatal_try_catch.HasTerminated())
+      return;
+
     if (fatal_try_catch.HasCaught()) {
       // The fatal exception function threw, so we must exit
       ReportException(env, fatal_try_catch);
@@ -2141,6 +2156,12 @@ void FatalException(Isolate* isolate,
 
 
 void FatalException(Isolate* isolate, const TryCatch& try_catch) {
+  // If we try to print out a termination exception, we'd just get 'null',
+  // so just crashing here with that information seems like a better idea,
+  // and in particular it seems like we should handle terminations at the call
+  // site for this function rather than by printing them out somewhere.
+  CHECK(!try_catch.HasTerminated());
+
   HandleScope scope(isolate);
   if (!try_catch.IsVerbose()) {
     FatalException(isolate, try_catch.Exception(), try_catch.Message());
@@ -2662,11 +2683,12 @@ void SetupProcessObject(Environment* env,
   Local<Object> process = env->process_object();
 
   auto title_string = FIXED_ONE_BYTE_STRING(env->isolate(), "title");
-  CHECK(process->SetAccessor(env->context(),
-                             title_string,
-                             ProcessTitleGetter,
-                             ProcessTitleSetter,
-                             env->as_external()).FromJust());
+  CHECK(process->SetAccessor(
+      env->context(),
+      title_string,
+      ProcessTitleGetter,
+      env->is_main_thread() ? ProcessTitleSetter : nullptr,
+      env->as_external()).FromJust());
 
   // process.version
   READONLY_PROPERTY(process,
@@ -2957,21 +2979,24 @@ void SetupProcessObject(Environment* env,
   CHECK(process->SetAccessor(env->context(),
                              debug_port_string,
                              DebugPortGetter,
-                             DebugPortSetter,
+                             env->is_main_thread() ? DebugPortSetter : nullptr,
                              env->as_external()).FromJust());
 
   // define various internal methods
-  env->SetMethod(process,
-                 "_startProfilerIdleNotifier",
-                 StartProfilerIdleNotifier);
-  env->SetMethod(process,
-                 "_stopProfilerIdleNotifier",
-                 StopProfilerIdleNotifier);
+  if (env->is_main_thread()) {
+    env->SetMethod(process,
+                   "_startProfilerIdleNotifier",
+                   StartProfilerIdleNotifier);
+    env->SetMethod(process,
+                   "_stopProfilerIdleNotifier",
+                   StopProfilerIdleNotifier);
+    env->SetMethod(process, "abort", Abort);
+    env->SetMethod(process, "chdir", Chdir);
+  }
+
   env->SetMethod(process, "_getActiveRequests", GetActiveRequests);
   env->SetMethod(process, "_getActiveHandles", GetActiveHandles);
   env->SetMethod(process, "reallyExit", Exit);
-  env->SetMethod(process, "abort", Abort);
-  env->SetMethod(process, "chdir", Chdir);
   env->SetMethod(process, "cwd", Cwd);
 
   env->SetMethod(process, "umask", Umask);
@@ -2979,29 +3004,33 @@ void SetupProcessObject(Environment* env,
 #if defined(__POSIX__) && !defined(__ANDROID__) && !defined(__CloudABI__)
   env->SetMethod(process, "getuid", GetUid);
   env->SetMethod(process, "geteuid", GetEUid);
-  env->SetMethod(process, "setuid", SetUid);
-  env->SetMethod(process, "seteuid", SetEUid);
-
-  env->SetMethod(process, "setgid", SetGid);
-  env->SetMethod(process, "setegid", SetEGid);
   env->SetMethod(process, "getgid", GetGid);
   env->SetMethod(process, "getegid", GetEGid);
 
   env->SetMethod(process, "getgroups", GetGroups);
-  env->SetMethod(process, "setgroups", SetGroups);
-  env->SetMethod(process, "initgroups", InitGroups);
+
+  if (env->is_main_thread()) {
+    env->SetMethod(process, "setuid", SetUid);
+    env->SetMethod(process, "seteuid", SetEUid);
+
+    env->SetMethod(process, "setgid", SetGid);
+    env->SetMethod(process, "setegid", SetEGid);
+    env->SetMethod(process, "setgroups", SetGroups);
+    env->SetMethod(process, "initgroups", InitGroups);
+  }
 #endif  // __POSIX__ && !defined(__ANDROID__) && !defined(__CloudABI__)
 
   env->SetMethod(process, "_kill", Kill);
+  env->SetMethod(process, "dlopen", DLOpen);
 
-  env->SetMethod(process, "_debugProcess", DebugProcess);
-  env->SetMethod(process, "_debugEnd", DebugEnd);
+  if (env->is_main_thread()) {
+    env->SetMethod(process, "_debugProcess", DebugProcess);
+    env->SetMethod(process, "_debugEnd", DebugEnd);
+  }
 
   env->SetMethod(process, "hrtime", Hrtime);
 
   env->SetMethod(process, "cpuUsage", CPUUsage);
-
-  env->SetMethod(process, "dlopen", DLOpen);
 
   env->SetMethod(process, "uptime", Uptime);
   env->SetMethod(process, "memoryUsage", MemoryUsage);
@@ -3042,8 +3071,10 @@ static void RawDebug(const FunctionCallbackInfo<Value>& args) {
 }
 
 
-static Local<Function> GetBootstrapper(Environment* env, Local<String> source,
-                                  Local<String> script_name) {
+static MaybeLocal<Function> GetBootstrapper(
+    Environment* env,
+    Local<String> source,
+    Local<String> script_name) {
   EscapableHandleScope scope(env->isolate());
 
   TryCatch try_catch(env->isolate());
@@ -3054,16 +3085,17 @@ static Local<Function> GetBootstrapper(Environment* env, Local<String> source,
   try_catch.SetVerbose(false);
 
   // Execute the bootstrapper javascript file
-  Local<Value> bootstrapper_v = ExecuteString(env, source, script_name);
+  MaybeLocal<Value> bootstrapper_v = ExecuteString(env, source, script_name);
+  if (bootstrapper_v.IsEmpty())  // This happens when execution was interrupted.
+    return MaybeLocal<Function>();
+
   if (try_catch.HasCaught())  {
     ReportException(env, try_catch);
     exit(10);
   }
 
-  CHECK(bootstrapper_v->IsFunction());
-  Local<Function> bootstrapper = Local<Function>::Cast(bootstrapper_v);
-
-  return scope.Escape(bootstrapper);
+  CHECK(bootstrapper_v.ToLocalChecked()->IsFunction());
+  return scope.Escape(bootstrapper_v.ToLocalChecked().As<Function>());
 }
 
 static bool ExecuteBootstrapper(Environment* env, Local<Function> bootstrapper,
@@ -3102,12 +3134,17 @@ void LoadEnvironment(Environment* env) {
   // node_js2c.
   Local<String> loaders_name =
       FIXED_ONE_BYTE_STRING(env->isolate(), "internal/bootstrap/loaders.js");
-  Local<Function> loaders_bootstrapper =
+  MaybeLocal<Function> loaders_bootstrapper =
       GetBootstrapper(env, LoadersBootstrapperSource(env), loaders_name);
   Local<String> node_name =
       FIXED_ONE_BYTE_STRING(env->isolate(), "internal/bootstrap/node.js");
-  Local<Function> node_bootstrapper =
+  MaybeLocal<Function> node_bootstrapper =
       GetBootstrapper(env, NodeBootstrapperSource(env), node_name);
+
+  if (loaders_bootstrapper.IsEmpty() || node_bootstrapper.IsEmpty()) {
+    // Execution was interrupted.
+    return;
+  }
 
   // Add a reference to the global object
   Local<Object> global = env->context()->Global();
@@ -3156,7 +3193,7 @@ void LoadEnvironment(Environment* env) {
 
   // Bootstrap internal loaders
   Local<Value> bootstrapped_loaders;
-  if (!ExecuteBootstrapper(env, loaders_bootstrapper,
+  if (!ExecuteBootstrapper(env, loaders_bootstrapper.ToLocalChecked(),
                            arraysize(loaders_bootstrapper_args),
                            loaders_bootstrapper_args,
                            &bootstrapped_loaders)) {
@@ -3169,7 +3206,7 @@ void LoadEnvironment(Environment* env) {
     env->process_object(),
     bootstrapped_loaders
   };
-  if (!ExecuteBootstrapper(env, node_bootstrapper,
+  if (!ExecuteBootstrapper(env, node_bootstrapper.ToLocalChecked(),
                            arraysize(node_bootstrapper_args),
                            node_bootstrapper_args,
                            &bootstrapped_node)) {
@@ -4298,6 +4335,7 @@ inline int Start(Isolate* isolate, IsolateData* isolate_data,
   WaitForInspectorDisconnect(&env);
 
   env.set_can_call_into_js(false);
+  env.stop_sub_worker_contexts();
   env.RunCleanup();
   RunAtExit(&env);
 

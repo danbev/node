@@ -410,6 +410,8 @@ added: v0.7.0
 The `process.abort()` method causes the Node.js process to exit immediately and
 generate a core file.
 
+This feature is not available in [`Worker`][] threads.
+
 ## process.arch
 <!-- YAML
 added: v0.5.0
@@ -516,6 +518,8 @@ try {
   console.error(`chdir: ${err}`);
 }
 ```
+
+This feature is not available in [`Worker`][] threads.
 
 ## process.config
 <!-- YAML
@@ -918,6 +922,8 @@ console.log(process.env.test);
 // => 1
 ```
 
+*Note*: `process.env` is read-only in [`Worker`][] threads.
+
 ## process.execArgv
 <!-- YAML
 added: v0.7.7
@@ -1029,6 +1035,9 @@ if (someConditionNotMet()) {
 If it is necessary to terminate the Node.js process due to an error condition,
 throwing an *uncaught* error and allowing the process to terminate accordingly
 is safer than calling `process.exit()`.
+
+*Note*: in [`Worker`][] threads, this function stops the current thread rather
+than the current process.
 
 ## process.exitCode
 <!-- YAML
@@ -1203,6 +1212,8 @@ console.log(process.getgroups());         // [ 27, 30, 46, 1000 ]
 
 This function is only available on POSIX platforms (i.e. not Windows or
 Android).
+
+This feature is not available in [`Worker`][] threads.
 
 ## process.kill(pid[, signal])
 <!-- YAML
@@ -1570,6 +1581,8 @@ if (process.getegid && process.setegid) {
 This function is only available on POSIX platforms (i.e. not Windows or
 Android).
 
+This feature is not available in [`Worker`][] threads.
+
 ## process.seteuid(id)
 <!-- YAML
 added: v2.0.0
@@ -1596,6 +1609,8 @@ if (process.geteuid && process.seteuid) {
 
 This function is only available on POSIX platforms (i.e. not Windows or
 Android).
+
+This feature is not available in [`Worker`][] threads.
 
 ## process.setgid(id)
 <!-- YAML
@@ -1624,6 +1639,8 @@ if (process.getgid && process.setgid) {
 This function is only available on POSIX platforms (i.e. not Windows or
 Android).
 
+This feature is not available in [`Worker`][] threads.
+
 ## process.setgroups(groups)
 <!-- YAML
 added: v0.9.4
@@ -1639,6 +1656,8 @@ The `groups` array can contain numeric group IDs, group names or both.
 
 This function is only available on POSIX platforms (i.e. not Windows or
 Android).
+
+This feature is not available in [`Worker`][] threads.
 
 ## process.setuid(id)
 <!-- YAML
@@ -1664,6 +1683,7 @@ if (process.getuid && process.setuid) {
 
 This function is only available on POSIX platforms (i.e. not Windows or
 Android).
+This feature is not available in [`Worker`][] threads.
 
 ## process.setUncaughtExceptionCaptureCallback(fn)
 <!-- YAML
@@ -1700,6 +1720,8 @@ a [Writable][] stream.
 `process.stderr` differs from other Node.js streams in important ways, see
 [note on process I/O][] for more information.
 
+This feature is not available in [`Worker`][] threads.
+
 ## process.stdin
 
 * {Stream}
@@ -1732,6 +1754,8 @@ In "old" streams mode the `stdin` stream is paused by default, so one
 must call `process.stdin.resume()` to read from it. Note also that calling
 `process.stdin.resume()` itself would switch stream to "old" mode.
 
+This feature is not available in [`Worker`][] threads.
+
 ## process.stdout
 
 * {Stream}
@@ -1749,6 +1773,8 @@ process.stdin.pipe(process.stdout);
 
 `process.stdout` differs from other Node.js streams in important ways, see
 [note on process I/O][] for more information.
+
+This feature is not available in [`Worker`][] threads.
 
 ### A note on process I/O
 
@@ -1864,6 +1890,8 @@ console.log(
   `Changed umask from ${oldmask.toString(8)} to ${newmask.toString(8)}`
 );
 ```
+
+This feature is not available in [`Worker`][] threads.
 
 ## process.uptime()
 <!-- YAML
@@ -2011,6 +2039,7 @@ cases:
 [`require.resolve()`]: modules.html#modules_require_resolve_request_options
 [`setTimeout(fn, 0)`]: timers.html#timers_settimeout_callback_delay_args
 [`v8.setFlagsFromString()`]: v8.html#v8_v8_setflagsfromstring_flags
+[`Worker`]: worker.html#worker_worker
 [Android building]: https://github.com/nodejs/node/blob/master/BUILDING.md#androidandroid-based-devices-eg-firefox-os
 [Child Process]: child_process.html
 [Cluster]: cluster.html
