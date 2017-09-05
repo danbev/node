@@ -88,6 +88,7 @@ const customTypesMap = {
   'net.Socket': 'net.html#net_class_net_socket',
 
   'module': 'modules.html#modules_the_module_object',
+  'MessagePort': 'worker.html#worker_class_messageport',
 
   'os.constants.dlopen': 'os.html#os_dlopen_constants',
 
