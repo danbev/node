@@ -823,7 +823,6 @@
             '<(OBJ_PATH)<(OBJ_SEPARATOR)node.<(OBJ_SUFFIX)',
             '<(OBJ_PATH)<(OBJ_SEPARATOR)node_buffer.<(OBJ_SUFFIX)',
             '<(OBJ_PATH)<(OBJ_SEPARATOR)node_debug_options.<(OBJ_SUFFIX)',
-            '<(OBJ_PATH)<(OBJ_SEPARATOR)node_dtrace.<(OBJ_SUFFIX)',
             '<(OBJ_PATH)<(OBJ_SEPARATOR)node_i18n.<(OBJ_SUFFIX)',
             '<(OBJ_PATH)<(OBJ_SEPARATOR)node_perf.<(OBJ_SUFFIX)',
             '<(OBJ_PATH)<(OBJ_SEPARATOR)node_platform.<(OBJ_SUFFIX)',
@@ -863,6 +862,11 @@
           'defines': [
             'HAVE_INSPECTOR=1',
           ],
+        }],
+        [ 'node_use_dtrace=="true"', {
+          'libraries': [
+            '<(OBJ_PATH)<(OBJ_SEPARATOR)node_dtrace.<(OBJ_SUFFIX)',
+          ]
         }],
         [ 'node_use_dtrace=="true" and OS!="mac" and OS!="linux"', {
           'copies': [{
