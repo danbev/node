@@ -867,6 +867,15 @@
             '<(OBJ_PATH)<(OBJ_SEPARATOR)node_dtrace.<(OBJ_SUFFIX)',
           ]
         }],
+        [ 'OS=="win"', {
+          'libraries': [
+            '<(OBJ_PATH)<(OBJ_SEPARATOR)backtrace_win32.<(OBJ_SUFFIX)',
+           ],
+        }, {
+          'libraries': [
+            '<(OBJ_PATH)<(OBJ_SEPARATOR)backtrace_posix.<(OBJ_SUFFIX)',
+           ],
+        }],
         [ 'node_use_dtrace=="true" and OS!="mac" and OS!="linux"', {
           'copies': [{
             'destination': '<(OBJ_DIR)/cctest/src',
@@ -877,10 +886,30 @@
             ]},
           ],
         }],
-        [ 'OS!="win"', {
-          'libraries': [
-            '<(OBJ_PATH)<(OBJ_SEPARATOR)backtrace_posix.<(OBJ_SUFFIX)',
-           ],
+        [ 'node_shared_zlib=="false"', {
+          'dependencies': [
+            'deps/zlib/zlib.gyp:zlib',
+           ]
+        }],
+        [ 'node_shared_openssl=="false" and node_shared=="false"', {
+          'dependencies': [
+            'deps/openssl/openssl.gyp:openssl'
+          ]
+        }],
+        [ 'node_shared_http_parser=="false"', {
+          'dependencies': [
+            'deps/http_parser/http_parser.gyp:http_parser'
+          ]
+        }],
+        [ 'node_shared_libuv=="false"', {
+          'dependencies': [
+            'deps/uv/uv.gyp:libuv'
+          ]
+        }],
+        [ 'node_use_v8_platform=="true"', {
+          'dependencies': [
+            'deps/v8/src/v8.gyp:v8_libplatform',
+          ],
         }],
         ['OS=="solaris"', {
           'ldflags': [ '-I<(SHARED_INTERMEDIATE_DIR)' ]
