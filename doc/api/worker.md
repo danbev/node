@@ -278,7 +278,7 @@ Most Node.js APIs are available inside of it.
 Notable differences inside a Worker environment are:
 
 - The [`process.stdin`][], [`process.stdout`][] and [`process.stderr`][]
-  properties are set to `null`.
+  may be redirected by the parent thread.
 - The [`require('worker').isMainThread`][] property is set to `false`.
 - The [`require('worker').postMessage()`][] method is available and the
   [`require('worker').on('workerMessage')`][] event will be emitted.
@@ -351,6 +351,13 @@ if (isMainThread) {
     described in the [HTML structured clone algorithm][], and an error will be
     thrown if the object cannot be cloned (e.g. because it contains
     `function`s).
+  * stdin {boolean} If this is set to true, then `worker.stdin` will
+    provide a writable stream whose contents will appear as `process.stdin`
+    inside the Worker. By default, no data is provided.
+  * stdout {boolean} If this is set to true, then `worker.stdout` will
+    not automatically be piped through to `process.stdout` in the parent.
+  * stderr {boolean} If this is set to true, then `worker.stderr` will
+    not automatically be piped through to `process.stderr` in the parent.
 
 ### Event: 'error'
 <!-- YAML
