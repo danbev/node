@@ -58,7 +58,7 @@ more details.
 Listeners on this event will receive a clone of the `value` parameter as passed
 to `postMessage()` and no further arguments.
 
-*Note*: This event is emitted on the `worker` module as returned by
+This event is emitted on the `worker` module as returned by
 `require('worker')` itself.
 
 ## worker.isMainThread
@@ -92,18 +92,18 @@ more details.
 added: REPLACEME
 -->
 
-Opposite of `unref`, calling `ref` on a previously `unref`d worker will *not*
-let the program exit if it's the only active handle left (the default behavior).
-If the worker is `ref`d calling `ref` again will have no effect.
+Opposite of `unref()`, calling `ref()` on a previously `unref()`d worker will
+*not* let the program exit if it's the only active handle left (the default
+behavior). If the worker is `ref()`d, calling `ref()` again will have no effect.
 
 ### worker.unref()
 <!-- YAML
 added: REPLACEME
 -->
 
-Calling `unref` on a worker will allow the thread to exit if this is the only
-active handle in the event system. If the worker is already `unref`d calling
-`unref` again will have no effect.
+Calling `unref()` on a worker will allow the thread to exit if this is the only
+active handle in the event system. If the worker is already `unref()`d calling
+`unref()` again will have no effect.
 
 ## worker.threadId
 <!-- YAML
@@ -281,17 +281,17 @@ Notable differences inside a Worker environment are:
   properties are set to `null`.
 - The [`require('worker').isMainThread`][] property is set to `false`.
 - The [`require('worker').postMessage()`][] method is available and the
-  [`require('worker').on('workerMessage')`][] event is being emitted.
+  [`require('worker').on('workerMessage')`][] event will be emitted.
 - [`process.exit()`][] does not stop the whole program, just the single thread,
   and [`process.abort()`][] is not available.
-- [`process.chdir()`][] as well as `process` methods that set group or user ids
+- [`process.chdir()`][] and `process` methods that set group or user ids
   are not available.
 - [`process.env`][] is a read-only reference to the environment variables.
-- [`process.title`][] can not be modified.
+- [`process.title`][] cannot be modified.
 - Signals will not be delivered through [`process.on('...')`][Signals events].
 - Native addons are not supported.
-- Execution may stop at any point as a result of the [`worker.terminate()`][]
-  method being invoked.
+- Execution may stop at any point as a result of [`worker.terminate()`][]
+  being invoked.
 - The [`inspector`][] module is not available.
 - IPC channels from parent processes are not accessible.
 
@@ -308,7 +308,7 @@ thread, and [`require('worker').postMessage()`][] and the
 child thread.
 
 To create custom messaging channels (which is encouraged over using the default
-global channel because it facilitates seperation of concerns), users can create
+global channel because it facilitates separation of concerns), users can create
 a `MessageChannel` object on either thread and pass one of the
 `MessagePort`s on that `MessageChannel` to the other thread through a
 pre-existing channel, such as the global one.
@@ -349,7 +349,7 @@ if (isMainThread) {
   * data {any} Any JavaScript value that will be cloned and made
     available as [`require('worker').workerData`][]. The cloning will occur as
     described in the [HTML structured clone algorithm][], and an error will be
-    thrown if the object can not be cloned (e.g. because it contains
+    thrown if the object cannot be cloned (e.g. because it contains
     `function`s).
 
 ### Event: 'error'
@@ -358,7 +358,7 @@ added: REPLACEME
 -->
 
 The `'error'` event is emitted if the worker thread throws an uncaught
-expection. In that case, the worker will be terminated.
+exception. In that case, the worker will be terminated.
 
 ### Event: 'exit'
 <!-- YAML
@@ -414,7 +414,7 @@ Stop all JavaScript execution in the worker thread as soon as possible.
 `callback` is an optional function that is invoked once this operation is known
 to have completed.
 
-*Note*: Currently, not all code in the internals of Node.js is prepared to
+Currently, not all code in the internals of Node.js is prepared to
 expect termination at arbitrary points in time and may crash if it encounters
 that condition. Consequently, you should currently only call `.terminate()` if
 it is known that the Worker thread is not accessing Node.js core modules other

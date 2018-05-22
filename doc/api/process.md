@@ -922,7 +922,7 @@ console.log(process.env.test);
 // => 1
 ```
 
-*Note*: `process.env` is read-only in [`Worker`][] threads.
+`process.env` is read-only in [`Worker`][] threads.
 
 ## process.execArgv
 <!-- YAML
@@ -1036,7 +1036,7 @@ If it is necessary to terminate the Node.js process due to an error condition,
 throwing an *uncaught* error and allowing the process to terminate accordingly
 is safer than calling `process.exit()`.
 
-*Note*: in [`Worker`][] threads, this function stops the current thread rather
+In [`Worker`][] threads, this function stops the current thread rather
 than the current process.
 
 ## process.exitCode
