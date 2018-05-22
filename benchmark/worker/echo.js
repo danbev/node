@@ -1,6 +1,5 @@
 'use strict';
 
-const { Worker } = require('worker');
 const common = require('../common.js');
 const path = require('path');
 const bench = common.createBenchmark(main, {
@@ -8,11 +7,13 @@ const bench = common.createBenchmark(main, {
   payload: ['string', 'object'],
   sendsPerBroadcast: [1, 10],
   n: [1e5]
-});
+}, { flags: ['--experimental-worker'] });
 
 const workerPath = path.resolve(__dirname, '..', 'fixtures', 'echo.worker.js');
 
 function main(conf) {
+  const { Worker } = require('worker');
+
   const n = +conf.n;
   const workers = +conf.workers;
   const sends = +conf.sendsPerBroadcast;
