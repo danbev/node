@@ -2992,14 +2992,13 @@ void SetupProcessObject(Environment* env,
                    StopProfilerIdleNotifier);
     env->SetMethod(process, "abort", Abort);
     env->SetMethod(process, "chdir", Chdir);
+    env->SetMethod(process, "umask", Umask);
   }
 
   env->SetMethod(process, "_getActiveRequests", GetActiveRequests);
   env->SetMethod(process, "_getActiveHandles", GetActiveHandles);
   env->SetMethod(process, "reallyExit", Exit);
   env->SetMethod(process, "cwd", Cwd);
-
-  env->SetMethod(process, "umask", Umask);
 
 #if defined(__POSIX__) && !defined(__ANDROID__) && !defined(__CloudABI__)
   env->SetMethod(process, "getuid", GetUid);
