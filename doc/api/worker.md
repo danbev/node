@@ -89,7 +89,9 @@ to stringify.
 
 `transferList` may be a list of `ArrayBuffer` and `MessagePort` objects.
 After transferring, they will not be usable on the sending side of the channel
-anymore (even if they are not contained in `value`).
+anymore (even if they are not contained in `value`). Unlike with
+[child processes][], transferring handles such as network sockets is currently
+not supported.
 
 If `value` contains [`SharedArrayBuffer`][] instances, those will be accessible
 from either thread.
@@ -146,6 +148,7 @@ as an event emitter, this will be called automatically once `'message'`
 listeners are attached.
 
 [`Buffer`]: buffer.html
+[child processes]: child_process.html
 [`EventEmitter`]: events.html
 [`MessagePort`]: #worker_class_messageport
 [`port.postMessage()`]: #worker_port_postmessage_value_transferlist
