@@ -653,7 +653,7 @@ STDERR / STDOUT, and the data's length is longer than the `maxBuffer` option.
 <a id="ERR_CLOSED_MESSAGE_PORT"></a>
 ### ERR_CLOSED_MESSAGE_PORT
 
-Used when there was an attempt to use a `MessagePort` instance in a closed
+There was an attempt to use a `MessagePort` instance in a closed
 state, usually after `.close()` has been called.
 
 <a id="ERR_CONSOLE_WRITABLE_STREAM"></a>

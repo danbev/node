@@ -36,7 +36,7 @@ asynchronous, two-way communications channel. It can be used to transfer
 structured data, memory regions and other `MessagePort`s between different
 [`Worker`][]s.
 
-*Note*: With the exception of `MessagePort`s being [`EventEmitter`][]s rather
+With the exception of `MessagePort`s being [`EventEmitter`][]s rather
 than `EventTarget`s, this implementation matches [browser `MessagePort`][]s.
 
 ### Event: 'close'
@@ -68,7 +68,7 @@ added: REPLACEME
 * Returns: {undefined}
 
 Disables further sending of messages on either side of the connection.
-This this method can be called once you know that no further communication
+This method can be called once you know that no further communication
 will happen over this `MessagePort`.
 
 ### port.postMessage(value[, transferList])
@@ -97,19 +97,22 @@ anymore (even if they are not contained in `value`).
 For more information on the serialization and deserialization mechanisms
 behind this API, see the [serialization API of the `v8` module][v8.serdes].
 
-*Note*: Because the object cloning uses the structured clone algorithm,
-non-enumberable properties, property accessors, and object prototypes are
+Because the object cloning uses the structured clone algorithm,
+non-enumerable properties, property accessors, and object prototypes are
 not preserved. In particular, [`Buffer`][] objects will be read as
 plain [`Uint8Array`][]s on the receiving side.
+
+The message object will be cloned immediately, and can be modified after
+posting without having side effects.
 
 ### port.ref()
 <!-- YAML
 added: REPLACEME
 -->
 
-Opposite of `unref`, calling `ref` on a previously `unref`d port will *not*
-let the program exit if it's the only active handle left (the default behavior).
-If the port is `ref`d calling `ref` again will have no effect.
+Opposite of `unref()`. Calling `ref()` on a previously `unref()`d port will
+*not* let the program exit if it's the only active handle left (the default
+behavior). If the port is `ref()`d, calling `ref()` again will have no effect.
 
 If listeners are attached or removed using `.on('message')`, the port will
 be `ref()`ed and `unref()`ed automatically depending on whether
@@ -120,9 +123,9 @@ listeners for the event exist.
 added: REPLACEME
 -->
 
-Calling `unref` on a port will allow the thread to exit if this is the only
-active handle in the event system. If the port is already `unref`d calling
-`unref` again will have no effect.
+Calling `unref()` on a port will allow the thread to exit if this is the only
+active handle in the event system. If the port is already `unref()`d calling
+`unref()` again will have no effect.
 
 If listeners are attached or removed using `.on('message')`, the port will
 be `ref()`ed and `unref()`ed automatically depending on whether
