@@ -21,6 +21,9 @@ A resource can also be closed before the callback is called. `AsyncHook` does
 not explicitly distinguish between these different cases but will represent them
 as the abstract concept that is a resource.
 
+If [`Worker`][]s are used, each thread has an independent `async_hooks`
+interface, and each thread wil use a new set of async IDs.
+
 ## Public API
 
 ### Overview
@@ -224,7 +227,7 @@ clearTimeout(setTimeout(() => {}, 10));
 ```
 
 Every new resource is assigned an ID that is unique within the scope of the
-current process.
+current Node.js instance.
 
 ###### `type`
 
