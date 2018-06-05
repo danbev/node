@@ -8880,6 +8880,9 @@ CALLBACK_SETTER(AllowWasmCodeGenerationCallback,
 
 CALLBACK_SETTER(WasmModuleCallback, ExtensionCallback, wasm_module_callback)
 CALLBACK_SETTER(WasmInstanceCallback, ExtensionCallback, wasm_instance_callback)
+CALLBACK_SETTER(WasmLookupImportCallback,
+                WasmLookupImportCallback,
+                wasm_lookup_import_callback)
 
 CALLBACK_SETTER(WasmCompileStreamingCallback, ApiImplementationCallback,
                 wasm_compile_streaming_callback)

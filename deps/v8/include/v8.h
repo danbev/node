@@ -6450,6 +6450,11 @@ typedef bool (*AllowCodeGenerationFromStringsCallback)(Local<Context> context,
 // --- WebAssembly compilation callbacks ---
 typedef bool (*ExtensionCallback)(const FunctionCallbackInfo<Value>&);
 
+typedef MaybeLocal<Object> (*WasmLookupImportCallback)(Isolate* isolate,
+                                                       MaybeLocal<Object> import_object,
+                                                       Local<String> module_name,
+                                                       Local<String> import_name);
+
 typedef bool (*AllowWasmCodeGenerationCallback)(Local<Context> context,
                                                 Local<String> source);
 
@@ -7800,6 +7805,8 @@ class V8_EXPORT Isolate {
    */
   void SetAllowWasmCodeGenerationCallback(
       AllowWasmCodeGenerationCallback callback);
+
+  void SetWasmLookupImportCallback(WasmLookupImportCallback callback);
 
   /**
    * Embedder over{ride|load} injection points for wasm APIs. The expectation
