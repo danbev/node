@@ -1418,7 +1418,8 @@ InstanceBuilder::InstanceBuilder(Isolate* isolate, ErrorThrower* thrower,
 MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   // Check that an imports argument was provided, if the module requires it.
   // No point in continuing otherwise.
-  if (!module_->import_table.empty() && ffi_.is_null()) {
+  if (!module_->import_table.empty() && ffi_.is_null() &&
+      !isolate_->wasm_lookup_import_callback()) {
     thrower_->TypeError(
         "Imports argument must be present and must be an object");
     return {};
@@ -1730,15 +1731,21 @@ bool InstanceBuilder::ExecuteStartFunction() {
 // Look up an import value in the {ffi_} object.
 MaybeHandle<Object> InstanceBuilder::LookupImport(uint32_t index,
                                                   Handle<String> module_name,
-
                                                   Handle<String> import_name) {
-  // We pre-validated in the js-api layer that the ffi object is present, and
-  // a JSObject, if the module has imports.
+  MaybeHandle<Object> result;
+  if (isolate_->wasm_lookup_import_callback()) {
+    MaybeLocal<v8::Object> import_object = ffi_.is_null() ? 
+      Local<v8::Object>() : ToApiHandle<v8::Object>(ffi_.ToHandleChecked());
+    MaybeLocal<v8::Object> lob = isolate_->wasm_lookup_import_callback()(
+        reinterpret_cast<v8::Isolate*>(isolate_),
+        import_object,
+        ToApiHandle<v8::String>(module_name),
+        ToApiHandle<v8::String>(import_name));
+    ffi_ = Utils::OpenHandle(*lob.ToLocalChecked());
+  }
   DCHECK(!ffi_.is_null());
+  result = Object::GetPropertyOrElement(ffi_.ToHandleChecked(), module_name);
 
-  // Look up the module first.
-  MaybeHandle<Object> result =
-      Object::GetPropertyOrElement(ffi_.ToHandleChecked(), module_name);
   if (result.is_null()) {
     return ReportTypeError("module not found", index, module_name);
   }
