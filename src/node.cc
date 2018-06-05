@@ -29,6 +29,7 @@
 #include "node_debug_options.h"
 #include "node_perf.h"
 #include "node_context_data.h"
+#include "node_wasm.h"
 
 #if defined HAVE_PERFCTR
 #include "node_counters.h"
@@ -4128,6 +4129,7 @@ Isolate* NewIsolate(ArrayBufferAllocator* allocator) {
   isolate->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
   isolate->SetFatalErrorHandler(OnFatalError);
   isolate->SetAllowWasmCodeGenerationCallback(AllowWasmCodeGenerationCallback);
+  isolate->SetWasmLookupImportCallback(NodeWasm::WasmLookupImportCallback);
 
   return isolate;
 }
