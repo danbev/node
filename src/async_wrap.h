@@ -205,7 +205,7 @@ class AsyncWrap : public BaseObject {
   double trigger_async_id_;
 };
 
-void LoadAsyncWrapperInfo(Environment* env);
+void RegisterGraphBuilderCallback(Environment* env);
 
 }  // namespace node
 

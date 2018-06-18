@@ -217,7 +217,7 @@ void Environment::Start(int argc,
   set_process_object(process_object);
 
   SetupProcessObject(this, argc, argv, exec_argc, exec_argv);
-  LoadAsyncWrapperInfo(this);
+  RegisterGraphBuilderCallback(this);
 
   static uv_once_t init_once = UV_ONCE_INIT;
   uv_once(&init_once, InitThreadLocalOnce);

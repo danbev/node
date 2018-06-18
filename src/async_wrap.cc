@@ -28,6 +28,7 @@
 #include "v8-profiler.h"
 
 using v8::Context;
+using v8::EmbedderGraph;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
@@ -40,10 +41,10 @@ using v8::MaybeLocal;
 using v8::Number;
 using v8::Object;
 using v8::ObjectTemplate;
+using v8::PersistentHandleVisitor;
 using v8::Promise;
 using v8::PromiseHookType;
 using v8::PropertyCallbackInfo;
-using v8::RetainedObjectInfo;
 using v8::String;
 using v8::Uint32;
 using v8::Undefined;
@@ -59,80 +60,6 @@ static const char* const provider_names[] = {
   NODE_ASYNC_PROVIDER_TYPES(V)
 #undef V
 };
-
-
-// Report correct information in a heapdump.
-
-class RetainedAsyncInfo: public RetainedObjectInfo {
- public:
-  explicit RetainedAsyncInfo(uint16_t class_id, AsyncWrap* wrap);
-
-  void Dispose() override;
-  bool IsEquivalent(RetainedObjectInfo* other) override;
-  intptr_t GetHash() override;
-  const char* GetLabel() override;
-  intptr_t GetSizeInBytes() override;
-
- private:
-  const char* label_;
-  const AsyncWrap* wrap_;
-  const int length_;
-};
-
-
-RetainedAsyncInfo::RetainedAsyncInfo(uint16_t class_id, AsyncWrap* wrap)
-    : label_(provider_names[class_id - NODE_ASYNC_ID_OFFSET]),
-      wrap_(wrap),
-      length_(wrap->self_size()) {
-}
-
-
-void RetainedAsyncInfo::Dispose() {
-  delete this;
-}
-
-
-bool RetainedAsyncInfo::IsEquivalent(RetainedObjectInfo* other) {
-  return label_ == other->GetLabel() &&
-          wrap_ == static_cast<RetainedAsyncInfo*>(other)->wrap_;
-}
-
-
-intptr_t RetainedAsyncInfo::GetHash() {
-  return reinterpret_cast<intptr_t>(wrap_);
-}
-
-
-const char* RetainedAsyncInfo::GetLabel() {
-  return label_;
-}
-
-
-intptr_t RetainedAsyncInfo::GetSizeInBytes() {
-  return length_;
-}
-
-
-RetainedObjectInfo* WrapperInfo(uint16_t class_id, Local<Value> wrapper) {
-  // No class_id should be the provider type of NONE.
-  CHECK_GT(class_id, NODE_ASYNC_ID_OFFSET);
-  // And make sure the class_id doesn't extend past the last provider.
-  CHECK_LE(class_id - NODE_ASYNC_ID_OFFSET, AsyncWrap::PROVIDERS_LENGTH);
-  CHECK(wrapper->IsObject());
-  CHECK(!wrapper.IsEmpty());
-
-  Local<Object> object = wrapper.As<Object>();
-  CHECK_GT(object->InternalFieldCount(), 0);
-
-  AsyncWrap* wrap;
-  ASSIGN_OR_RETURN_UNWRAP(&wrap, object, nullptr);
-
-  return new RetainedAsyncInfo(class_id, wrap);
-}
-
-
-// end RetainedAsyncInfo
-
 
 struct AsyncWrapObject : public AsyncWrap {
   static inline void New(const FunctionCallbackInfo<Value>& args) {
@@ -602,16 +529,65 @@ void AsyncWrap::Initialize(Local<Object> target,
   }
 }
 
+namespace {
 
-void LoadAsyncWrapperInfo(Environment* env) {
-  HeapProfiler* heap_profiler = env->isolate()->GetHeapProfiler();
-#define V(PROVIDER)                                                           \
-  heap_profiler->SetWrapperClassInfoProvider(                                 \
-      (NODE_ASYNC_ID_OFFSET + AsyncWrap::PROVIDER_ ## PROVIDER), WrapperInfo);
-  NODE_ASYNC_PROVIDER_TYPES(V)
-#undef V
+class GraphBuilder : public v8::PersistentHandleVisitor {
+ public:
+  class Node : public EmbedderGraph::Node {
+   public:
+    Node(const char* name, size_t size) : name_(name), size_(size) {}
+    const char* Name() override { return name_; }
+    size_t SizeInBytes() override { return size_; }
+
+   private:
+    const char* name_;
+    size_t size_;
+  };
+
+  class Group : public Node {
+   public:
+    explicit Group(const char* name) : Node(name, 0) {}
+    bool IsRootNode() { return true; }
+  };
+
+  GraphBuilder(Isolate* isolate, EmbedderGraph* graph)
+      : isolate_(isolate), graph_(graph) {
+    group_ = graph->AddNode(std::unique_ptr<Group>(new Group("nodejs-group")));
+  }
+
+  static void BuildGraph(Isolate* isolate, EmbedderGraph* graph, void* data) {
+    GraphBuilder builder(isolate, graph);
+    isolate->VisitHandlesWithClassIds(&builder);
+  }
+
+  void VisitPersistentHandle(v8::Persistent<v8::Value>* value,
+                             uint16_t class_id) override {
+    if (value->WrapperClassId() == NODE_ASYNC_ID_OFFSET) {
+      Local<Value> wrapper = Local<Value>::New(isolate_,
+                                               Persistent<Value>::Cast(*value));
+      EmbedderGraph::Node* node = graph_->V8Node(wrapper);
+      graph_->AddEdge(node, group_);
+      graph_->AddEdge(group_, node);
+    }
+  }
+
+ private:
+  v8::Isolate* isolate_;
+  v8::EmbedderGraph* graph_;
+  v8::EmbedderGraph::Node* group_;
+};
+
+}  // namespace
+
+void BuildGraphCallback(v8::Isolate* isolate, v8::EmbedderGraph* graph) {
+  GraphBuilder builder(isolate, graph);
+  isolate->VisitHandlesWithClassIds(&builder);
 }
 
+void RegisterGraphBuilderCallback(Environment* env) {
+  HeapProfiler* heap_profiler = env->isolate()->GetHeapProfiler();
+  heap_profiler->SetBuildEmbedderGraphCallback(BuildGraphCallback);
+}
 
 AsyncWrap::AsyncWrap(Environment* env,
                      Local<Object> object,
@@ -629,8 +605,7 @@ AsyncWrap::AsyncWrap(Environment* env,
   CHECK_NE(provider, PROVIDER_NONE);
   CHECK_GE(object->InternalFieldCount(), 1);
 
-  // Shift provider value over to prevent id collision.
-  persistent().SetWrapperClassId(NODE_ASYNC_ID_OFFSET + provider_type_);
+  persistent().SetWrapperClassId(NODE_ASYNC_ID_OFFSET);
 
   // Use AsyncReset() call to execute the init() callbacks.
   AsyncReset(execution_async_id, silent);
