@@ -938,6 +938,7 @@
         'src',
         'tools/msvs/genfiles',
         'deps/v8/include',
+        'deps/v8',
         'deps/cares/include',
         'deps/uv/include',
         '<(SHARED_INTERMEDIATE_DIR)', # for node_natives.h

@@ -1,7 +1,21 @@
 #include "async_wrap.h"
 #include "node_internals.h"
 #include "libplatform/libplatform.h"
+#undef UNREACHABLE
+#undef CHECK
+#undef CHECK_EQ
+#undef CHECK_NE
+#undef CHECK_LE
+#undef CHECK_LT
+#undef CHECK_GE
+#undef CHECK_GT
+#undef CHECK_IMPLIES
+#undef DISALLOW_COPY_AND_ASSIGN
+#undef STRINGIFY
 #include "v8-profiler.h"
+#include "src/profiler/allocation-tracker.h"
+#include "src/profiler/heap-profiler.h"
+#include "src/profiler/heap-snapshot-generator-inl.h"
 
 #include <string>
 #include "gtest/gtest.h"
@@ -37,6 +51,36 @@ const v8::HeapGraphNode* GetNode(const HeapGraphNode* parent,
   }
   return nullptr;
 }
+
+static bool ValidateSnapshot(const v8::HeapSnapshot* snapshot, int depth = 3) {
+  namespace i = v8::internal;
+  i::HeapSnapshot* heap_snapshot = const_cast<i::HeapSnapshot*>(
+      reinterpret_cast<const i::HeapSnapshot*>(snapshot));
+
+  v8::base::HashMap visited;
+  std::deque<i::HeapGraphEdge>& edges = heap_snapshot->edges();
+  for (size_t i = 0; i < edges.size(); ++i) {
+    v8::base::HashMap::Entry* entry = visited.LookupOrInsert(
+        reinterpret_cast<void*>(edges[i].to()),
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(edges[i].to())));
+    uint32_t ref_count = static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(entry->value));
+    entry->value = reinterpret_cast<void*>(ref_count + 1);
+  }
+  uint32_t unretained_entries_count = 0;
+  std::vector<i::HeapEntry>& entries = heap_snapshot->entries();
+  for (i::HeapEntry& entry : entries) {
+    v8::base::HashMap::Entry* map_entry = visited.Lookup(
+        reinterpret_cast<void*>(&entry),
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&entry)));
+    if (!map_entry && entry.id() != 1) {
+      entry.Print("entry with no retainer", "", depth, 0);
+      ++unretained_entries_count;
+    }
+  }
+  return unretained_entries_count == 0;
+}
+
 
 TEST_F(GraphBuilderTest, BuildGraph) {
   const v8::HandleScope handle_scope(isolate_);
@@ -74,6 +118,7 @@ TEST_F(GraphBuilderTest, BuildGraph) {
   EXPECT_EQ(group, child_2->GetFromNode());
   EXPECT_STREQ("two", *String::Utf8Value(isolate_,
                                          child_2->GetToNode()->GetName()));
+  CHECK(ValidateSnapshot(snapshot));
 }
 
 class FakeAsyncWrap : public node::AsyncWrap {
