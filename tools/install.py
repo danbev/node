@@ -175,6 +175,7 @@ def headers(action):
     'src/node_api_types.h',
     'src/node_buffer.h',
     'src/node_object_wrap.h',
+    'src/node_security_api.h',
     'src/node_version.h',
   ], 'include/node/')
 

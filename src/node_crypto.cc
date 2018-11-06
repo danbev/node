@@ -28,6 +28,7 @@
 #include "node_crypto_groups.h"
 #include "node_crypto_clienthello-inl.h"
 #include "node_mutex.h"
+#include "node_security_spi.h"
 #include "node_internals.h"
 #include "tls_wrap.h"  // TLSWrap
 
@@ -64,7 +65,7 @@ v8::MaybeLocal<v8::Object> New(Environment* env, unsigned char* udata,
 namespace crypto {
 
 using node::THROW_ERR_TLS_INVALID_PROTOCOL_METHOD;
-
+using node::security::SecurityProvider;
 using v8::Array;
 using v8::Boolean;
 using v8::ConstructorBehavior;
@@ -221,10 +222,8 @@ static int NoPasswordCallback(char* buf, int size, int rwflag, void* u) {
 struct CryptoErrorVector : public std::vector<std::string> {
   inline void Capture() {
     clear();
-    while (auto err = ERR_get_error()) {
-      char buf[256];
-      ERR_error_string_n(err, buf, sizeof(buf));
-      push_back(buf);
+    for (const std::string& e : SecurityProvider::GetErrors()) {
+      push_back(e);
     }
     std::reverse(begin(), end());
   }
@@ -4726,15 +4725,15 @@ struct RandomBytesJob : public CryptoJob {
   unsigned char* data;
   size_t size;
   CryptoErrorVector errors;
-  Maybe<int> rc;
+  SecurityProvider::Status status;
 
   inline explicit RandomBytesJob(Environment* env)
-      : CryptoJob(env), rc(Nothing<int>()) {}
+      : CryptoJob(env), status(SecurityProvider::Status::ok) {}
 
   inline void DoThreadPoolWork() override {
     CheckEntropy();  // Ensure that OpenSSL's PRNG is properly seeded.
-    rc = Just(RAND_bytes(data, size));
-    if (0 == rc.FromJust()) errors.Capture();
+    status = SecurityProvider::RandomBytes(size, data);
+    if (status == SecurityProvider::Status::error) errors.Capture();
   }
 
   inline void AfterThreadPoolWork() override {
@@ -5410,82 +5409,39 @@ void GetSSLCiphers(const FunctionCallbackInfo<Value>& args) {
 }
 
 
-class CipherPushContext {
- public:
-  explicit CipherPushContext(Environment* env)
-      : arr(Array::New(env->isolate())),
-        env_(env) {
-  }
-
-  inline Environment* env() const { return env_; }
-
-  Local<Array> arr;
-
- private:
-  Environment* env_;
-};
-
-
-template <class TypeName>
-static void array_push_back(const TypeName* md,
-                            const char* from,
-                            const char* to,
-                            void* arg) {
-  CipherPushContext* ctx = static_cast<CipherPushContext*>(arg);
-  ctx->arr->Set(ctx->env()->context(),
-                ctx->arr->Length(),
-                OneByteString(ctx->env()->isolate(), from)).FromJust();
-}
-
-
 void GetCiphers(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  CipherPushContext ctx(env);
-  EVP_CIPHER_do_all_sorted(array_push_back<EVP_CIPHER>, &ctx);
-  args.GetReturnValue().Set(ctx.arr);
+  Local<Array> ciphers = Array::New(env->isolate());
+  for (const std::string& c : SecurityProvider::GetCiphers()) {
+    ciphers->Set(env->context(),
+                 ciphers->Length(),
+                 OneByteString(env->isolate(), c.c_str())).FromJust();
+  }
+  args.GetReturnValue().Set(ciphers);
 }
 
 
 void GetHashes(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  CipherPushContext ctx(env);
-  EVP_MD_do_all_sorted(array_push_back<EVP_MD>, &ctx);
-  args.GetReturnValue().Set(ctx.arr);
+  Local<Array> hashes = Array::New(env->isolate());
+  for (const std::string& h : SecurityProvider::GetHashes()) {
+    hashes->Set(env->context(),
+                hashes->Length(),
+                OneByteString(env->isolate(), h.c_str())).FromJust();
+  }
+  args.GetReturnValue().Set(hashes);
 }
 
 
 void GetCurves(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  const size_t num_curves = EC_get_builtin_curves(nullptr, 0);
-  Local<Array> arr = Array::New(env->isolate(), num_curves);
-
-  if (num_curves) {
-    std::vector<EC_builtin_curve> curves(num_curves);
-
-    if (EC_get_builtin_curves(curves.data(), num_curves)) {
-      for (size_t i = 0; i < num_curves; i++) {
-        arr->Set(env->context(),
-                 i,
-                 OneByteString(env->isolate(),
-                               OBJ_nid2sn(curves[i].nid))).FromJust();
-      }
-    }
+  Local<Array> curves = Array::New(env->isolate());
+  for (const std::string& c : SecurityProvider::GetCurves()) {
+    curves->Set(env->context(),
+                curves->Length(),
+                OneByteString(env->isolate(), c.c_str())).FromJust();
   }
-
-  args.GetReturnValue().Set(arr);
-}
-
-
-bool VerifySpkac(const char* data, unsigned int len) {
-  NetscapeSPKIPointer spki(NETSCAPE_SPKI_b64_decode(data, len));
-  if (!spki)
-    return false;
-
-  EVPKeyPointer pkey(X509_PUBKEY_get(spki->spkac->pubkey));
-  if (!pkey)
-    return false;
-
-  return NETSCAPE_SPKI_verify(spki.get(), pkey.get()) > 0;
+  args.GetReturnValue().Set(curves);
 }
 
 
@@ -5499,38 +5455,9 @@ void VerifySpkac(const FunctionCallbackInfo<Value>& args) {
   char* data = Buffer::Data(args[0]);
   CHECK_NOT_NULL(data);
 
-  verify_result = VerifySpkac(data, length);
+  verify_result = SecurityProvider::VerifySpkac(data, length);
 
   args.GetReturnValue().Set(verify_result);
-}
-
-
-char* ExportPublicKey(const char* data, int len, size_t* size) {
-  char* buf = nullptr;
-
-  BIOPointer bio(BIO_new(BIO_s_mem()));
-  if (!bio)
-    return nullptr;
-
-  NetscapeSPKIPointer spki(NETSCAPE_SPKI_b64_decode(data, len));
-  if (!spki)
-    return nullptr;
-
-  EVPKeyPointer pkey(NETSCAPE_SPKI_get_pubkey(spki.get()));
-  if (!pkey)
-    return nullptr;
-
-  if (PEM_write_bio_PUBKEY(bio.get(), pkey.get()) <= 0)
-    return nullptr;
-
-  BUF_MEM* ptr;
-  BIO_get_mem_ptr(bio.get(), &ptr);
-
-  *size = ptr->length;
-  buf = Malloc(*size);
-  memcpy(buf, ptr->data, *size);
-
-  return buf;
 }
 
 
@@ -5545,24 +5472,12 @@ void ExportPublicKey(const FunctionCallbackInfo<Value>& args) {
   CHECK_NOT_NULL(data);
 
   size_t pkey_size;
-  char* pkey = ExportPublicKey(data, length, &pkey_size);
+  char* pkey = SecurityProvider::ExportPublicKey(data, length, &pkey_size);
   if (pkey == nullptr)
     return args.GetReturnValue().SetEmptyString();
 
   Local<Value> out = Buffer::New(env, pkey, pkey_size).ToLocalChecked();
   args.GetReturnValue().Set(out);
-}
-
-
-OpenSSLBuffer ExportChallenge(const char* data, int len) {
-  NetscapeSPKIPointer sp(NETSCAPE_SPKI_b64_decode(data, len));
-  if (!sp)
-    return nullptr;
-
-  unsigned char* buf = nullptr;
-  ASN1_STRING_to_UTF8(&buf, sp->spkac->challenge);
-
-  return OpenSSLBuffer(reinterpret_cast<char*>(buf));
 }
 
 
@@ -5576,7 +5491,8 @@ void ExportChallenge(const FunctionCallbackInfo<Value>& args) {
   char* data = Buffer::Data(args[0]);
   CHECK_NOT_NULL(data);
 
-  OpenSSLBuffer cert = ExportChallenge(data, len);
+  unsigned char* buf = SecurityProvider::ExportChallenge(data, len);
+  OpenSSLBuffer cert = OpenSSLBuffer(reinterpret_cast<char*>(buf));
   if (!cert)
     return args.GetReturnValue().SetEmptyString();
 
@@ -5654,63 +5570,6 @@ void TimingSafeEqual(const FunctionCallbackInfo<Value>& args) {
   return args.GetReturnValue().Set(CRYPTO_memcmp(buf1, buf2, buf_length) == 0);
 }
 
-void InitCryptoOnce() {
-  SSL_load_error_strings();
-  OPENSSL_no_config();
-
-  // --openssl-config=...
-  if (!per_process_opts->openssl_config.empty()) {
-    OPENSSL_load_builtin_modules();
-#ifndef OPENSSL_NO_ENGINE
-    ENGINE_load_builtin_engines();
-#endif
-    ERR_clear_error();
-    CONF_modules_load_file(
-        per_process_opts->openssl_config.c_str(),
-        nullptr,
-        CONF_MFLAGS_DEFAULT_SECTION);
-    int err = ERR_get_error();
-    if (0 != err) {
-      fprintf(stderr,
-              "openssl config failed: %s\n",
-              ERR_error_string(err, nullptr));
-      CHECK_NE(err, 0);
-    }
-  }
-
-  SSL_library_init();
-  OpenSSL_add_all_algorithms();
-
-#ifdef NODE_FIPS_MODE
-  /* Override FIPS settings in cnf file, if needed. */
-  unsigned long err = 0;  // NOLINT(runtime/int)
-  if (per_process_opts->enable_fips_crypto ||
-      per_process_opts->force_fips_crypto) {
-    if (0 == FIPS_mode() && !FIPS_mode_set(1)) {
-      err = ERR_get_error();
-    }
-  }
-  if (0 != err) {
-    fprintf(stderr,
-            "openssl fips failed: %s\n",
-            ERR_error_string(err, nullptr));
-    UNREACHABLE();
-  }
-#endif  // NODE_FIPS_MODE
-
-
-  // Turn off compression. Saves memory and protects against CRIME attacks.
-  // No-op with OPENSSL_NO_COMP builds of OpenSSL.
-  sk_SSL_COMP_zero(SSL_COMP_get_compression_methods());
-
-#ifndef OPENSSL_NO_ENGINE
-  ERR_load_ENGINE_strings();
-  ENGINE_load_builtin_engines();
-#endif  // !OPENSSL_NO_ENGINE
-
-  NodeBIO::GetMethod();
-}
-
 
 #ifndef OPENSSL_NO_ENGINE
 void SetEngine(const FunctionCallbackInfo<Value>& args) {
@@ -5768,7 +5627,7 @@ void Initialize(Local<Object> target,
                 Local<Context> context,
                 void* priv) {
   static uv_once_t init_once = UV_ONCE_INIT;
-  uv_once(&init_once, InitCryptoOnce);
+  uv_once(&init_once, SecurityProvider::InitProviderOnce);
 
   Environment* env = Environment::GetCurrent(context);
   SecureContext::Initialize(env, target);
@@ -5836,20 +5695,6 @@ void Initialize(Local<Object> target,
 #endif  // OPENSSL_NO_SCRYPT
 }
 
-constexpr int search(const char* s, int n, int c) {
-  return *s == c ? n : search(s + 1, n + 1, c);
-}
-
-std::string GetOpenSSLVersion() {
-  // sample openssl version string format
-  // for reference: "OpenSSL 1.1.0i 14 Aug 2018"
-  char buf[128];
-  const int start = search(OPENSSL_VERSION_TEXT, 0, ' ') + 1;
-  const int end = search(OPENSSL_VERSION_TEXT + start, start, ' ');
-  const int len = end - start;
-  snprintf(buf, sizeof(buf), "%.*s", len, &OPENSSL_VERSION_TEXT[start]);
-  return std::string(buf);
-}
 
 }  // namespace crypto
 }  // namespace node

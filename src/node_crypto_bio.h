@@ -25,6 +25,7 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include "node_crypto.h"
+#include "node_security_spi.h"
 #include "openssl/bio.h"
 #include "env-inl.h"
 #include "util-inl.h"
@@ -165,7 +166,7 @@ class NodeBIO : public MemoryRetainer {
   Buffer* read_head_ = nullptr;
   Buffer* write_head_ = nullptr;
 
-  friend void node::crypto::InitCryptoOnce();
+  friend void node::security::SecurityProvider::InitProviderOnce();
 };
 
 }  // namespace crypto

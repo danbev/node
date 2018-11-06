@@ -9,6 +9,7 @@
 
 #if HAVE_OPENSSL
 #include "node_crypto.h"
+#include "node_security_spi.h"
 #endif
 
 namespace node {
@@ -30,7 +31,7 @@ Metadata::Versions::Versions() {
   http_parser = http_parser_version;
 
 #if HAVE_OPENSSL
-  openssl = crypto::GetOpenSSLVersion();
+  openssl = security::SecurityProvider::GetVersion();
 #endif
 }
 

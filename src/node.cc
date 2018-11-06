@@ -29,13 +29,10 @@
 #include "node_native_module.h"
 #include "node_perf.h"
 #include "node_platform.h"
+#include "node_security_spi.h"
 #include "node_revert.h"
 #include "node_version.h"
 #include "tracing/traced_value.h"
-
-#if HAVE_OPENSSL
-#include "node_crypto.h"
-#endif
 
 #if defined(NODE_HAVE_I18N_SUPPORT)
 #include "node_i18n.h"
@@ -110,6 +107,7 @@ typedef int mode_t;
 namespace node {
 
 using native_module::NativeModuleLoader;
+using node::security::SecurityProvider;
 using options_parser::kAllowedInEnvironment;
 using options_parser::kDisallowedInEnvironment;
 using v8::Array;
@@ -852,23 +850,23 @@ static Local<Object> GetFeatures(Environment* env) {
            True(env->isolate())).FromJust();
 
 #ifdef HAVE_OPENSSL
-  Local<Boolean> have_openssl = True(env->isolate());
+  Local<Boolean> have_ssl = True(env->isolate());
 #else
-  Local<Boolean> have_openssl = False(env->isolate());
+  Local<Boolean> have_ssl = False(env->isolate());
 #endif
 
   obj->Set(env->context(),
            FIXED_ONE_BYTE_STRING(env->isolate(), "tls_alpn"),
-           have_openssl).FromJust();
+           have_ssl).FromJust();
   obj->Set(env->context(),
            FIXED_ONE_BYTE_STRING(env->isolate(), "tls_sni"),
-           have_openssl).FromJust();
+           have_ssl).FromJust();
   obj->Set(env->context(),
            FIXED_ONE_BYTE_STRING(env->isolate(), "tls_ocsp"),
-           have_openssl).FromJust();
+           have_ssl).FromJust();
   obj->Set(env->context(),
            FIXED_ONE_BYTE_STRING(env->isolate(), "tls"),
-           have_openssl).FromJust();
+           have_ssl).FromJust();
 
   return scope.Escape(obj);
 }
@@ -2085,6 +2083,7 @@ int Start(int argc, char** argv) {
   PlatformInit();
   performance::performance_node_start = PERFORMANCE_NOW();
 
+
   CHECK_GT(argc, 0);
 
 #ifdef NODE_ENABLE_LARGE_CODE_PAGES
@@ -2107,16 +2106,9 @@ int Start(int argc, char** argv) {
   {
     std::string extra_ca_certs;
     if (SafeGetenv("NODE_EXTRA_CA_CERTS", &extra_ca_certs))
-      crypto::UseExtraCaCerts(extra_ca_certs);
+      SecurityProvider::UseCaExtraCerts(extra_ca_certs);
   }
-#ifdef NODE_FIPS_MODE
-  // In the case of FIPS builds we should make sure
-  // the random source is properly initialized first.
-  OPENSSL_init();
-#endif  // NODE_FIPS_MODE
-  // V8 on Windows doesn't have a good source of entropy. Seed it from
-  // OpenSSL's pool.
-  V8::SetEntropySource(crypto::EntropySource);
+  SecurityProvider::Init();
 #endif  // HAVE_OPENSSL
 
   InitializeV8Platform(per_process_opts->v8_thread_pool_size);
