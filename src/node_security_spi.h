@@ -2,6 +2,7 @@
 #define SRC_NODE_SECURITY_SPI_H_
 
 #include <string>
+#include <vector>
 
 namespace node {
 namespace security {
@@ -18,6 +19,30 @@ namespace security {
 class SecurityProvider {
  public:
   enum class Status { ok, error };
+
+  class PBKDF2 {
+   public:
+    PBKDF2(std::vector<char> pass,
+           std::vector<char> salt,
+           uint32_t iteration_count,
+           std::string digest_name,
+           unsigned char* keybuf,
+           size_t keybuf_size);
+    virtual ~PBKDF2() {}
+    virtual bool Generate();
+    virtual bool HasDigest();
+    virtual void Cleanup();
+    SecurityProvider::Status Status() { return status_; }
+   private:
+    std::vector<char> pass_;
+    std::vector<char> salt_;
+    uint32_t iteration_count_;
+    std::string digest_name_;
+    unsigned char* keybuf_;
+    size_t keybuf_size_;
+    SecurityProvider::Status status_;
+    void* digest_;
+  };
 
   static void Init();
   static void InitProviderOnce();

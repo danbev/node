@@ -4769,28 +4769,20 @@ void RandomBytes(const FunctionCallbackInfo<Value>& args) {
 
 
 struct PBKDF2Job : public CryptoJob {
-  unsigned char* keybuf_data;
-  size_t keybuf_size;
-  std::vector<char> pass;
-  std::vector<char> salt;
-  uint32_t iteration_count;
-  const EVP_MD* digest;
   Maybe<bool> success;
 
-  inline explicit PBKDF2Job(Environment* env)
-      : CryptoJob(env), success(Nothing<bool>()) {}
+  inline explicit PBKDF2Job(Environment* env,
+                            SecurityProvider::PBKDF2 pbkdf2)
+      : CryptoJob(env), success(Nothing<bool>()), pbkdf2_(pbkdf2) {}
 
   inline ~PBKDF2Job() override {
-    Cleanse();
+    pbkdf2_.Cleanup();
   }
 
   inline void DoThreadPoolWork() override {
-    auto salt_data = reinterpret_cast<const unsigned char*>(salt.data());
-    const bool ok =
-        PKCS5_PBKDF2_HMAC(pass.data(), pass.size(), salt_data, salt.size(),
-                          iteration_count, digest, keybuf_size, keybuf_data);
+    const bool ok = pbkdf2_.Generate();
     success = Just(ok);
-    Cleanse();
+    pbkdf2_.Cleanup();
   }
 
   inline void AfterThreadPoolWork() override {
@@ -4802,12 +4794,8 @@ struct PBKDF2Job : public CryptoJob {
     return Boolean::New(env->isolate(), success.FromJust());
   }
 
-  inline void Cleanse() {
-    OPENSSL_cleanse(pass.data(), pass.size());
-    OPENSSL_cleanse(salt.data(), salt.size());
-    pass.clear();
-    salt.clear();
-  }
+ private:
+  SecurityProvider::PBKDF2 pbkdf2_;
 };
 
 
@@ -4820,15 +4808,27 @@ inline void PBKDF2(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[3]->IsUint32());  // iteration_count
   CHECK(args[4]->IsString());  // digest_name
   CHECK(args[5]->IsObject() || args[5]->IsUndefined());  // wrap object
-  std::unique_ptr<PBKDF2Job> job(new PBKDF2Job(env));
-  job->keybuf_data = reinterpret_cast<unsigned char*>(Buffer::Data(args[0]));
-  job->keybuf_size = Buffer::Length(args[0]);
-  CopyBuffer(args[1], &job->pass);
-  CopyBuffer(args[2], &job->salt);
-  job->iteration_count = args[3].As<Uint32>()->Value();
   Utf8Value digest_name(args.GetIsolate(), args[4]);
-  job->digest = EVP_get_digestbyname(*digest_name);
-  if (job->digest == nullptr) return rv.Set(-1);
+
+  std::vector<char> pass {};
+  CopyBuffer(args[1], &pass);
+  std::vector<char> salt {};
+  CopyBuffer(args[2], &salt);
+
+  SecurityProvider::PBKDF2 pbkdf2 {
+    pass,
+    salt,
+    args[3].As<Uint32>()->Value(),
+    *digest_name,
+    reinterpret_cast<unsigned char*>(Buffer::Data(args[0])),
+    Buffer::Length(args[0])};
+
+  std::unique_ptr<PBKDF2Job> job(new PBKDF2Job(env, pbkdf2));
+
+  if (!pbkdf2.HasDigest()) {
+    return rv.Set(-1);
+  }
+
   if (args[5]->IsObject()) return PBKDF2Job::Run(std::move(job), args[5]);
   env->PrintSyncTrace();
   job->DoThreadPoolWork();

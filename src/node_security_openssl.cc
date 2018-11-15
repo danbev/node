@@ -207,6 +207,39 @@ SecurityProvider::Status SecurityProvider::RandomBytes(size_t size,
   return (1 == RAND_bytes(data, size)) ? Status::ok : Status::error;
 }
 
+SecurityProvider::PBKDF2::PBKDF2(std::vector<char> pass,
+                                 std::vector<char> salt,
+                                 uint32_t iteration_count,
+                                 std::string digest_name,
+                                 unsigned char* keybuf,
+                                 size_t keybuf_size) : pass_(pass),
+                                 salt_(salt),
+                                 iteration_count_(iteration_count),
+                                 digest_name_(digest_name),
+                                 keybuf_(keybuf), keybuf_size_(keybuf_size) {
+  digest_ = const_cast<EVP_MD*>(EVP_get_digestbyname(digest_name_.c_str()));
+}
+
+bool SecurityProvider::PBKDF2::HasDigest() {
+  return digest_ != nullptr;
+}
+
+bool SecurityProvider::PBKDF2::Generate() {
+  auto salt_data = reinterpret_cast<const unsigned char*>(salt_.data());
+  const EVP_MD* digest = static_cast<const EVP_MD*>(digest_);
+  return PKCS5_PBKDF2_HMAC(pass_.data(), pass_.size(),
+                           salt_data, salt_.size(),
+                           iteration_count_, digest,
+                           keybuf_size_, keybuf_);
+}
+
+void SecurityProvider::PBKDF2::Cleanup() {
+  OPENSSL_cleanse(pass_.data(), pass_.size());
+  OPENSSL_cleanse(salt_.data(), salt_.size());
+  pass_.clear();
+  salt_.clear();
+}
+
 }  // namespace security
 
 }  // namespace node
