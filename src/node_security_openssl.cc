@@ -636,6 +636,42 @@ class DSAKeyPairGenerationConfig : public KeyPairGenerationConfig {
   const int divisor_bits_;
 };
 
+class ECKeyPairGenerationConfig : public KeyPairGenerationConfig {
+ public:
+  ECKeyPairGenerationConfig(int curve_nid, int param_encoding)
+    : curve_nid_(curve_nid), param_encoding_(param_encoding) {}
+
+  crypto::EVPKeyCtxPointer Setup() override {
+    crypto::EVPKeyCtxPointer param_ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC,
+                                                           nullptr));
+    if (!param_ctx)
+      return nullptr;
+
+    if (EVP_PKEY_paramgen_init(param_ctx.get()) <= 0)
+      return nullptr;
+
+    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(param_ctx.get(),
+                                               curve_nid_) <= 0)
+      return nullptr;
+
+    if (EVP_PKEY_CTX_set_ec_param_enc(param_ctx.get(), param_encoding_) <= 0)
+      return nullptr;
+
+    EVP_PKEY* params = nullptr;
+    if (EVP_PKEY_paramgen(param_ctx.get(), &params) <= 0)
+      return nullptr;
+    param_ctx.reset();
+
+    crypto::EVPKeyCtxPointer key_ctx(EVP_PKEY_CTX_new(params, nullptr));
+    EVP_PKEY_free(params);
+    return key_ctx;
+  }
+
+ private:
+  const int curve_nid_;
+  const int param_encoding_;
+};
+
 typedef security::KeyPairEncodingConfig PublicKeyEncodingConfig;
 
 struct PrivateKeyEncodingConfig : public security::KeyPairEncodingConfig {
@@ -697,6 +733,24 @@ bool SecurityProvider::KeyPairGeneratorDSA::Generate() {
       std::make_unique<DSAKeyPairGenerationConfig>(modulus_bits_,
                                                    divisor_bits_);
   return ::node::security::Generate(config.get(), &pkey_);
+}
+
+bool SecurityProvider::KeyPairGeneratorEC::Generate() {
+  CHECK(param_encoding_ == OPENSSL_EC_NAMED_CURVE ||
+        param_encoding_ == OPENSSL_EC_EXPLICIT_CURVE);
+  std::unique_ptr<KeyPairGenerationConfig> config =
+      std::make_unique<ECKeyPairGenerationConfig>(curve_id_,
+                                                  param_encoding_);
+  return ::node::security::Generate(config.get(), &pkey_);
+}
+
+bool SecurityProvider::KeyPairGeneratorEC::LoadCurve() {
+  const char* curve_name = curve_name_.c_str();
+  curve_id_ = EC_curve_nist2nid(curve_name);
+  if (curve_id_ == NID_undef)
+    curve_id_ = OBJ_sn2nid(curve_name);
+  // TODO(tniessen): Should we also support OBJ_ln2nid? (Other APIs don't.)
+  return curve_id_ != NID_undef;
 }
 
 bool SecurityProvider::KeyPairGenerator::EncodeKeys(Key* public_key,

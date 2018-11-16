@@ -5448,23 +5448,47 @@ void GenerateKeyPairDSA(const FunctionCallbackInfo<Value>& args) {
 }
 
 void GenerateKeyPairEC(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
   CHECK(args[0]->IsString());
   String::Utf8Value curve_name(args.GetIsolate(), args[0].As<String>());
-  int curve_nid = EC_curve_nist2nid(*curve_name);
-  if (curve_nid == NID_undef)
-    curve_nid = OBJ_sn2nid(*curve_name);
-  // TODO(tniessen): Should we also support OBJ_ln2nid? (Other APIs don't.)
-  if (curve_nid == NID_undef) {
-    Environment* env = Environment::GetCurrent(args);
-    return env->ThrowTypeError("Invalid ECDH curve name");
-  }
   CHECK(args[1]->IsUint32());
   const uint32_t param_encoding = args[1].As<Int32>()->Value();
-  CHECK(param_encoding == OPENSSL_EC_NAMED_CURVE ||
-        param_encoding == OPENSSL_EC_EXPLICIT_CURVE);
-  std::unique_ptr<KeyPairGenerationConfig> config(
-      new ECKeyPairGenerationConfig(curve_nid, param_encoding));
-  GenerateKeyPair(args, 2, std::move(config));
+  CHECK(args[2]->IsInt32());
+  security::PKEncodingType pub_encoding_type =
+      static_cast<security::PKEncodingType>(args[2].As<Int32>()->Value());
+  CHECK(args[3]->IsInt32());
+  security::PKFormatType pub_encoding_format =
+      static_cast<security::PKFormatType>(args[3].As<Int32>()->Value());
+  CHECK(args[4]->IsInt32());
+  security::PKEncodingType pri_encoding_type =
+      static_cast<security::PKEncodingType>(args[4].As<Int32>()->Value());
+  CHECK(args[5]->IsInt32());
+  security::PKFormatType pri_encoding_format =
+      static_cast<security::PKFormatType>(args[5].As<Int32>()->Value());
+  std::string cipher_name;
+  std::string passphrase;
+  if (args[6]->IsString()) {
+    String::Utf8Value c_name(env->isolate(), args[6].As<String>());
+    cipher_name = std::string(*c_name);
+
+    CHECK(args[7]->IsString());
+    String::Utf8Value ph(env->isolate(), args[7].As<String>());
+    passphrase = std::string(*ph);
+  }
+
+  SecurityProvider::KeyPairGeneratorEC* keygen =
+    new SecurityProvider::KeyPairGeneratorEC(std::string(*curve_name),
+                                              param_encoding,
+                                              pub_encoding_type,
+                                              pub_encoding_format,
+                                              pri_encoding_type,
+                                              pri_encoding_format,
+                                              cipher_name,
+                                              passphrase);
+  if (!keygen->LoadCurve())
+    return env->ThrowTypeError("Invalid ECDH curve name");
+
+  GenerateKeyPair_NEW(args, keygen);
 }
 
 

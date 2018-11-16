@@ -196,6 +196,28 @@ class SecurityProvider {
     const uint32_t divisor_bits_;
   };
 
+  class KeyPairGeneratorEC : public KeyPairGenerator {
+   public:
+    KeyPairGeneratorEC(std::string curve_name,
+                       uint32_t param_encoding,
+                       PKEncodingType pub_encoding,
+                       PKFormatType pub_format,
+                       PKEncodingType pri_encoding,
+                       PKFormatType pri_format,
+                       std::string cipher_name,
+                       std::string passphrase) :
+        KeyPairGenerator(pub_encoding, pub_format, pri_encoding, pri_format,
+                         cipher_name, passphrase), curve_name_(curve_name),
+                         param_encoding_(param_encoding) {}
+    ~KeyPairGeneratorEC() = default;
+    bool Generate();
+    bool LoadCurve();
+   private:
+    std::string curve_name_;
+    uint32_t curve_id_;
+    uint32_t param_encoding_;
+  };
+
   static void Init();
   static void InitProviderOnce();
   static std::string GetProviderName();
