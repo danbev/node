@@ -280,6 +280,270 @@ bool SecurityProvider::TimingSafeEquals(const void* a,
   return CRYPTO_memcmp(a, b, len) == 0;
 }
 
+// Pop errors from OpenSSL's error stack that were added
+// between when this was constructed and destructed.
+struct MarkPopErrorOnReturn {
+  MarkPopErrorOnReturn() { ERR_set_mark(); }
+  ~MarkPopErrorOnReturn() { ERR_pop_to_mark(); }
+};
+
+enum ParsePublicKeyResult {
+  kParsePublicOk,
+  kParsePublicNotRecognized,
+  kParsePublicFailed
+};
+
+static int PasswordCallback(char* buf, int size, int rwflag, void* u) {
+  if (u) {
+    size_t buflen = static_cast<size_t>(size);
+    size_t len = strlen(static_cast<const char*>(u));
+    len = len > buflen ? buflen : len;
+    memcpy(buf, u, len);
+    return len;
+  }
+
+  return 0;
+}
+
+static ParsePublicKeyResult TryParsePublicKey(
+    crypto::EVPKeyPointer* pkey,
+    const crypto::BIOPointer& bp,
+    const char* name,
+    // NOLINTNEXTLINE(runtime/int)
+    std::function<EVP_PKEY*(const unsigned char** p, long l)> parse) {
+  unsigned char* der_data;
+  long der_len;  // NOLINT(runtime/int)
+
+  // This skips surrounding data and decodes PEM to DER.
+  {
+    MarkPopErrorOnReturn mark_pop_error_on_return;
+    if (PEM_bytes_read_bio(&der_data, &der_len, nullptr, name,
+                           bp.get(), nullptr, nullptr) != 1)
+      return kParsePublicNotRecognized;
+  }
+
+  // OpenSSL might modify the pointer, so we need to make a copy before parsing.
+  const unsigned char* p = der_data;
+  pkey->reset(parse(&p, der_len));
+  OPENSSL_clear_free(der_data, der_len);
+
+  return *pkey ? kParsePublicOk : kParsePublicFailed;
+}
+
+static ParsePublicKeyResult ParsePublicKey(crypto::EVPKeyPointer* pkey,
+                                           const char* key_pem,
+                                           int key_pem_len) {
+  crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+                                        key_pem_len));
+  if (!bp)
+    return kParsePublicFailed;
+
+  ParsePublicKeyResult ret;
+
+  // Try PKCS#8 first.
+  ret = TryParsePublicKey(pkey, bp, "PUBLIC KEY",
+      [](const unsigned char** p, long l) {  // NOLINT(runtime/int)
+        return d2i_PUBKEY(nullptr, p, l);
+      });
+  if (ret != kParsePublicNotRecognized)
+    return ret;
+
+  // Maybe it is PKCS#1.
+  CHECK(BIO_reset(bp.get()));
+  ret = TryParsePublicKey(pkey, bp, "RSA PUBLIC KEY",
+      [](const unsigned char** p, long l) {  // NOLINT(runtime/int)
+        return d2i_PublicKey(EVP_PKEY_RSA, nullptr, p, l);
+      });
+  if (ret != kParsePublicNotRecognized)
+    return ret;
+
+  // X.509 fallback.
+  CHECK(BIO_reset(bp.get()));
+  return TryParsePublicKey(pkey, bp, "CERTIFICATE",
+      [](const unsigned char** p, long l) {  // NOLINT(runtime/int)
+        crypto::X509Pointer x509(d2i_X509(nullptr, p, l));
+        return x509 ? X509_get_pubkey(x509.get()) : nullptr;
+      });
+}
+
+bool SecurityProvider::KeyCipher::PrivateEncrypt(const char* key_pem,
+                                                 int key_pem_len,
+                                                 const char* passphrase,
+                                                 int padding,
+                                                 const unsigned char* data,
+                                                 int len,
+                                                 unsigned char** out,
+                                                 size_t* out_len) {
+  crypto::EVPKeyPointer pkey;
+  crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+                                        key_pem_len));
+  if (bp == nullptr)
+    return false;
+
+  pkey.reset(PEM_read_bio_PrivateKey(bp.get(),
+                                     nullptr,
+                                     PasswordCallback,
+                                     const_cast<char*>(passphrase)));
+  if (pkey == nullptr)
+    return false;
+
+  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  if (!ctx)
+    return false;
+  if (EVP_PKEY_sign_init(ctx.get()) <= 0)
+    return false;
+  if (EVP_PKEY_CTX_set_rsa_padding(ctx.get(), padding) <= 0)
+    return false;
+
+  if (EVP_PKEY_sign(ctx.get(), nullptr, out_len, data, len) <= 0)
+    return false;
+
+  *out = Malloc<unsigned char>(*out_len);
+
+  if (EVP_PKEY_sign(ctx.get(), *out, out_len, data, len) <= 0)
+    return false;
+
+  return true;
+}
+
+bool SecurityProvider::KeyCipher::PrivateDecrypt(const char* key_pem,
+                             int key_pem_len,
+                             const char* passphrase,
+                             int padding,
+                             const unsigned char* data,
+                             int len,
+                             unsigned char** out,
+                             size_t* out_len) {
+  crypto::EVPKeyPointer pkey;
+  crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+                                        key_pem_len));
+  if (bp == nullptr)
+    return false;
+
+  pkey.reset(PEM_read_bio_PrivateKey(bp.get(),
+                                     nullptr,
+                                     PasswordCallback,
+                                     const_cast<char*>(passphrase)));
+  if (pkey == nullptr)
+    return false;
+
+  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  if (!ctx)
+    return false;
+  if (EVP_PKEY_decrypt_init(ctx.get()) <= 0)
+    return false;
+  if (EVP_PKEY_CTX_set_rsa_padding(ctx.get(), padding) <= 0)
+    return false;
+
+  if (EVP_PKEY_decrypt(ctx.get(), nullptr, out_len, data, len) <= 0)
+    return false;
+
+  *out = Malloc<unsigned char>(*out_len);
+
+  if (EVP_PKEY_decrypt(ctx.get(), *out, out_len, data, len) <= 0)
+    return false;
+
+  return true;
+}
+
+bool SecurityProvider::KeyCipher::PublicEncrypt(const char* key_pem,
+                             int key_pem_len,
+                             const char* passphrase,
+                             int padding,
+                             const unsigned char* data,
+                             int len,
+                             unsigned char** out,
+                             size_t* out_len) {
+  crypto::EVPKeyPointer pkey;
+
+  // Check if this is a PKCS#8 or RSA public key before trying as X.509 and
+  // private key.
+  ParsePublicKeyResult pkeyres = ParsePublicKey(&pkey, key_pem, key_pem_len);
+  if (pkeyres == kParsePublicFailed)
+    return false;
+
+  if (pkey == nullptr) {
+    // Private key fallback.
+    crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+                                          key_pem_len));
+    if (bp == nullptr)
+      return false;
+    pkey.reset(PEM_read_bio_PrivateKey(bp.get(),
+                                       nullptr,
+                                       PasswordCallback,
+                                       const_cast<char*>(passphrase)));
+    if (pkey == nullptr)
+      return false;
+  }
+
+  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  if (!ctx)
+    return false;
+  if (EVP_PKEY_encrypt_init(ctx.get()) <= 0)
+    return false;
+  if (EVP_PKEY_CTX_set_rsa_padding(ctx.get(), padding) <= 0)
+    return false;
+
+  if (EVP_PKEY_encrypt(ctx.get(), nullptr, out_len, data, len) <= 0)
+    return false;
+
+  *out = Malloc<unsigned char>(*out_len);
+
+  if (EVP_PKEY_encrypt(ctx.get(), *out, out_len, data, len) <= 0)
+    return false;
+
+  return true;
+}
+
+bool SecurityProvider::KeyCipher::PublicDecrypt(const char* key_pem,
+                             int key_pem_len,
+                             const char* passphrase,
+                             int padding,
+                             const unsigned char* data,
+                             int len,
+                             unsigned char** out,
+                             size_t* out_len) {
+  crypto::EVPKeyPointer pkey;
+
+  // Check if this is a PKCS#8 or RSA public key before trying as X.509 and
+  // private key.
+  ParsePublicKeyResult pkeyres = ParsePublicKey(&pkey, key_pem, key_pem_len);
+  if (pkeyres == kParsePublicFailed)
+    return false;
+
+  if (pkey == nullptr) {
+    // Private key fallback.
+    crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+                                          key_pem_len));
+    if (bp == nullptr)
+      return false;
+    pkey.reset(PEM_read_bio_PrivateKey(bp.get(),
+                                       nullptr,
+                                       PasswordCallback,
+                                       const_cast<char*>(passphrase)));
+    if (pkey == nullptr)
+      return false;
+  }
+
+  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  if (!ctx)
+    return false;
+  if (EVP_PKEY_verify_recover_init(ctx.get()) <= 0)
+    return false;
+  if (EVP_PKEY_CTX_set_rsa_padding(ctx.get(), padding) <= 0)
+    return false;
+
+  if (EVP_PKEY_verify_recover(ctx.get(), nullptr, out_len, data, len) <= 0)
+    return false;
+
+  *out = Malloc<unsigned char>(*out_len);
+
+  if (EVP_PKEY_verify_recover(ctx.get(), *out, out_len, data, len) <= 0)
+    return false;
+
+  return true;
+}
+
 }  // namespace security
 
 }  // namespace node

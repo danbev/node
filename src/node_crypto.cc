@@ -3956,62 +3956,7 @@ void Verify::VerifyFinal(const FunctionCallbackInfo<Value>& args) {
 }
 
 
-template <PublicKeyCipher::Operation operation,
-          PublicKeyCipher::EVP_PKEY_cipher_init_t EVP_PKEY_cipher_init,
-          PublicKeyCipher::EVP_PKEY_cipher_t EVP_PKEY_cipher>
-bool PublicKeyCipher::Cipher(const char* key_pem,
-                             int key_pem_len,
-                             const char* passphrase,
-                             int padding,
-                             const unsigned char* data,
-                             int len,
-                             unsigned char** out,
-                             size_t* out_len) {
-  EVPKeyPointer pkey;
-
-  // Check if this is a PKCS#8 or RSA public key before trying as X.509 and
-  // private key.
-  if (operation == kPublic) {
-    ParsePublicKeyResult pkeyres = ParsePublicKey(&pkey, key_pem, key_pem_len);
-    if (pkeyres == kParsePublicFailed)
-      return false;
-  }
-  if (!pkey) {
-    // Private key fallback.
-    BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem), key_pem_len));
-    if (!bp)
-      return false;
-    pkey.reset(PEM_read_bio_PrivateKey(bp.get(),
-                                       nullptr,
-                                       PasswordCallback,
-                                       const_cast<char*>(passphrase)));
-    if (!pkey)
-      return false;
-  }
-
-  EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
-  if (!ctx)
-    return false;
-  if (EVP_PKEY_cipher_init(ctx.get()) <= 0)
-    return false;
-  if (EVP_PKEY_CTX_set_rsa_padding(ctx.get(), padding) <= 0)
-    return false;
-
-  if (EVP_PKEY_cipher(ctx.get(), nullptr, out_len, data, len) <= 0)
-    return false;
-
-  *out = Malloc<unsigned char>(*out_len);
-
-  if (EVP_PKEY_cipher(ctx.get(), *out, out_len, data, len) <= 0)
-    return false;
-
-  return true;
-}
-
-
-template <PublicKeyCipher::Operation operation,
-          PublicKeyCipher::EVP_PKEY_cipher_init_t EVP_PKEY_cipher_init,
-          PublicKeyCipher::EVP_PKEY_cipher_t EVP_PKEY_cipher>
+template <node::security::SecurityProvider::KeyCipher::CipherFunction f>
 void PublicKeyCipher::Cipher(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
@@ -4033,7 +3978,7 @@ void PublicKeyCipher::Cipher(const FunctionCallbackInfo<Value>& args) {
 
   ClearErrorOnReturn clear_error_on_return;
 
-  bool r = Cipher<operation, EVP_PKEY_cipher_init, EVP_PKEY_cipher>(
+  bool r = f(
       kbuf,
       klen,
       args.Length() >= 4 && !args[3]->IsNull() ? *passphrase : nullptr,
@@ -5639,21 +5584,13 @@ void Initialize(Local<Object> target,
   env->SetMethodNoSideEffect(target, "getHashes", GetHashes);
   env->SetMethodNoSideEffect(target, "getCurves", GetCurves);
   env->SetMethod(target, "publicEncrypt",
-                 PublicKeyCipher::Cipher<PublicKeyCipher::kPublic,
-                                         EVP_PKEY_encrypt_init,
-                                         EVP_PKEY_encrypt>);
+      PublicKeyCipher::Cipher<SecurityProvider::KeyCipher::PublicEncrypt>);
   env->SetMethod(target, "privateDecrypt",
-                 PublicKeyCipher::Cipher<PublicKeyCipher::kPrivate,
-                                         EVP_PKEY_decrypt_init,
-                                         EVP_PKEY_decrypt>);
+      PublicKeyCipher::Cipher<SecurityProvider::KeyCipher::PrivateDecrypt>);
   env->SetMethod(target, "privateEncrypt",
-                 PublicKeyCipher::Cipher<PublicKeyCipher::kPrivate,
-                                         EVP_PKEY_sign_init,
-                                         EVP_PKEY_sign>);
+      PublicKeyCipher::Cipher<SecurityProvider::KeyCipher::PrivateEncrypt>);
   env->SetMethod(target, "publicDecrypt",
-                 PublicKeyCipher::Cipher<PublicKeyCipher::kPublic,
-                                         EVP_PKEY_verify_recover_init,
-                                         EVP_PKEY_verify_recover>);
+      PublicKeyCipher::Cipher<SecurityProvider::KeyCipher::PublicDecrypt>);
 #ifndef OPENSSL_NO_SCRYPT
   env->SetMethod(target, "scrypt", Scrypt);
 #endif  // OPENSSL_NO_SCRYPT

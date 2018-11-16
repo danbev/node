@@ -29,6 +29,7 @@
 #include "node_crypto_clienthello.h"
 
 #include "node_buffer.h"
+#include "node_security_spi.h"
 
 #include "env.h"
 #include "async_wrap-inl.h"
@@ -569,31 +570,7 @@ class Verify : public SignBase {
 
 class PublicKeyCipher {
  public:
-  typedef int (*EVP_PKEY_cipher_init_t)(EVP_PKEY_CTX* ctx);
-  typedef int (*EVP_PKEY_cipher_t)(EVP_PKEY_CTX* ctx,
-                                   unsigned char* out, size_t* outlen,
-                                   const unsigned char* in, size_t inlen);
-
-  enum Operation {
-    kPublic,
-    kPrivate
-  };
-
-  template <Operation operation,
-            EVP_PKEY_cipher_init_t EVP_PKEY_cipher_init,
-            EVP_PKEY_cipher_t EVP_PKEY_cipher>
-  static bool Cipher(const char* key_pem,
-                     int key_pem_len,
-                     const char* passphrase,
-                     int padding,
-                     const unsigned char* data,
-                     int len,
-                     unsigned char** out,
-                     size_t* out_len);
-
-  template <Operation operation,
-            EVP_PKEY_cipher_init_t EVP_PKEY_cipher_init,
-            EVP_PKEY_cipher_t EVP_PKEY_cipher>
+  template <node::security::SecurityProvider::KeyCipher::CipherFunction f>
   static void Cipher(const v8::FunctionCallbackInfo<v8::Value>& args);
 };
 

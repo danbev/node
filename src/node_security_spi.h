@@ -66,6 +66,54 @@ class SecurityProvider {
     void* digest_;
   };
 
+  class KeyCipher {
+   public:
+    using CipherFunction = bool (*) (const char*,
+                                     int,
+                                     const char*,
+                                     int,
+                                     const unsigned char*,
+                                     int,
+                                     unsigned char**,
+                                     size_t*);
+
+    static bool PublicEncrypt(const char* key_pem,
+                              int key_pem_len,
+                              const char* passphrase,
+                              int padding,
+                              const unsigned char* data,
+                              int len,
+                              unsigned char** out,
+                              size_t* out_len);
+
+    static bool PublicDecrypt(const char* key_pem,
+                              int key_pem_len,
+                              const char* passphrase,
+                              int padding,
+                              const unsigned char* data,
+                              int len,
+                              unsigned char** out,
+                              size_t* out_len);
+
+    static bool PrivateEncrypt(const char* key_pem,
+                              int key_pem_len,
+                              const char* passphrase,
+                              int padding,
+                              const unsigned char* data,
+                              int len,
+                              unsigned char** out,
+                              size_t* out_len);
+
+    static bool PrivateDecrypt(const char* key_pem,
+                               int key_pem_len,
+                               const char* passphrase,
+                               int padding,
+                               const unsigned char* data,
+                               int len,
+                               unsigned char** out,
+                               size_t* out_len);
+  };
+
   static void Init();
   static void InitProviderOnce();
   static std::string GetProviderName();
