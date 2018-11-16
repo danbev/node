@@ -5041,30 +5041,9 @@ class ECKeyPairGenerationConfig : public KeyPairGenerationConfig {
   const int param_encoding_;
 };
 
-enum PKEncodingType {
-  // RSAPublicKey / RSAPrivateKey according to PKCS#1.
-  PK_ENCODING_PKCS1,
-  // PrivateKeyInfo or EncryptedPrivateKeyInfo according to PKCS#8.
-  PK_ENCODING_PKCS8,
-  // SubjectPublicKeyInfo according to X.509.
-  PK_ENCODING_SPKI,
-  // ECPrivateKey according to SEC1.
-  PK_ENCODING_SEC1
-};
+typedef security::KeyPairEncodingConfig PublicKeyEncodingConfig;
 
-enum PKFormatType {
-  PK_FORMAT_DER,
-  PK_FORMAT_PEM
-};
-
-struct KeyPairEncodingConfig {
-  PKEncodingType type_;
-  PKFormatType format_;
-};
-
-typedef KeyPairEncodingConfig PublicKeyEncodingConfig;
-
-struct PrivateKeyEncodingConfig : public KeyPairEncodingConfig {
+struct PrivateKeyEncodingConfig : public security::KeyPairEncodingConfig {
   const EVP_CIPHER* cipher_;
   // This char* will be passed to OPENSSL_clear_free.
   std::shared_ptr<char> passphrase_;
@@ -5141,29 +5120,29 @@ class GenerateKeyPairJob : public CryptoJob {
     CHECK(bio);
 
     // Encode the public key.
-    if (public_key_encoding_.type_ == PK_ENCODING_PKCS1) {
+    if (public_key_encoding_.type_ == security::PK_ENCODING_PKCS1) {
       // PKCS#1 is only valid for RSA keys.
       CHECK_EQ(EVP_PKEY_id(pkey), EVP_PKEY_RSA);
       RSAPointer rsa(EVP_PKEY_get1_RSA(pkey));
-      if (public_key_encoding_.format_ == PK_FORMAT_PEM) {
+      if (public_key_encoding_.format_ == security::PK_FORMAT_PEM) {
         // Encode PKCS#1 as PEM.
         if (PEM_write_bio_RSAPublicKey(bio.get(), rsa.get()) != 1)
           return false;
       } else {
         // Encode PKCS#1 as DER.
-        CHECK_EQ(public_key_encoding_.format_, PK_FORMAT_DER);
+        CHECK_EQ(public_key_encoding_.format_, security::PK_FORMAT_DER);
         if (i2d_RSAPublicKey_bio(bio.get(), rsa.get()) != 1)
           return false;
       }
     } else {
-      CHECK_EQ(public_key_encoding_.type_, PK_ENCODING_SPKI);
-      if (public_key_encoding_.format_ == PK_FORMAT_PEM) {
+      CHECK_EQ(public_key_encoding_.type_, security::PK_ENCODING_SPKI);
+      if (public_key_encoding_.format_ == security::PK_FORMAT_PEM) {
         // Encode SPKI as PEM.
         if (PEM_write_bio_PUBKEY(bio.get(), pkey) != 1)
           return false;
       } else {
         // Encode SPKI as DER.
-        CHECK_EQ(public_key_encoding_.format_, PK_FORMAT_DER);
+        CHECK_EQ(public_key_encoding_.format_, security::PK_FORMAT_DER);
         if (i2d_PUBKEY_bio(bio.get(), pkey) != 1)
           return false;
       }
@@ -5174,12 +5153,12 @@ class GenerateKeyPairJob : public CryptoJob {
     USE(BIO_reset(bio.get()));
 
     // Now do the same for the private key (which is a bit more difficult).
-    if (private_key_encoding_.type_ == PK_ENCODING_PKCS1) {
+    if (private_key_encoding_.type_ == security::PK_ENCODING_PKCS1) {
       // PKCS#1 is only permitted for RSA keys.
       CHECK_EQ(EVP_PKEY_id(pkey), EVP_PKEY_RSA);
 
       RSAPointer rsa(EVP_PKEY_get1_RSA(pkey));
-      if (private_key_encoding_.format_ == PK_FORMAT_PEM) {
+      if (private_key_encoding_.format_ == security::PK_FORMAT_PEM) {
         // Encode PKCS#1 as PEM.
         char* pass = private_key_encoding_.passphrase_.get();
         if (PEM_write_bio_RSAPrivateKey(
@@ -5191,13 +5170,13 @@ class GenerateKeyPairJob : public CryptoJob {
           return false;
       } else {
         // Encode PKCS#1 as DER. This does not permit encryption.
-        CHECK_EQ(private_key_encoding_.format_, PK_FORMAT_DER);
+        CHECK_EQ(private_key_encoding_.format_, security::PK_FORMAT_DER);
         CHECK_NULL(private_key_encoding_.cipher_);
         if (i2d_RSAPrivateKey_bio(bio.get(), rsa.get()) != 1)
           return false;
       }
-    } else if (private_key_encoding_.type_ == PK_ENCODING_PKCS8) {
-      if (private_key_encoding_.format_ == PK_FORMAT_PEM) {
+    } else if (private_key_encoding_.type_ == security::PK_ENCODING_PKCS8) {
+      if (private_key_encoding_.format_ == security::PK_FORMAT_PEM) {
         // Encode PKCS#8 as PEM.
         if (PEM_write_bio_PKCS8PrivateKey(
                 bio.get(), pkey,
@@ -5208,7 +5187,7 @@ class GenerateKeyPairJob : public CryptoJob {
           return false;
       } else {
         // Encode PKCS#8 as DER.
-        CHECK_EQ(private_key_encoding_.format_, PK_FORMAT_DER);
+        CHECK_EQ(private_key_encoding_.format_, security::PK_FORMAT_DER);
         if (i2d_PKCS8PrivateKey_bio(
                 bio.get(), pkey,
                 private_key_encoding_.cipher_,
@@ -5218,13 +5197,13 @@ class GenerateKeyPairJob : public CryptoJob {
           return false;
       }
     } else {
-      CHECK_EQ(private_key_encoding_.type_, PK_ENCODING_SEC1);
+      CHECK_EQ(private_key_encoding_.type_, security::PK_ENCODING_SEC1);
 
       // SEC1 is only permitted for EC keys.
       CHECK_EQ(EVP_PKEY_id(pkey), EVP_PKEY_EC);
 
       ECKeyPointer ec_key(EVP_PKEY_get1_EC_KEY(pkey));
-      if (private_key_encoding_.format_ == PK_FORMAT_PEM) {
+      if (private_key_encoding_.format_ == security::PK_FORMAT_PEM) {
         // Encode SEC1 as PEM.
         char* pass = private_key_encoding_.passphrase_.get();
         if (PEM_write_bio_ECPrivateKey(
@@ -5236,7 +5215,7 @@ class GenerateKeyPairJob : public CryptoJob {
           return false;
       } else {
         // Encode SEC1 as DER. This does not permit encryption.
-        CHECK_EQ(private_key_encoding_.format_, PK_FORMAT_DER);
+        CHECK_EQ(private_key_encoding_.format_, security::PK_FORMAT_DER);
         CHECK_NULL(private_key_encoding_.cipher_);
         if (i2d_ECPrivateKey_bio(bio.get(), ec_key.get()) != 1)
           return false;
@@ -5247,17 +5226,18 @@ class GenerateKeyPairJob : public CryptoJob {
     return true;
   }
 
-  inline void BIOToStringOrBuffer(BIO* bio, PKFormatType format,
+  inline void BIOToStringOrBuffer(BIO* bio,
+                                  security::PKFormatType format,
                                   Local<Value>* out) const {
     BUF_MEM* bptr;
     BIO_get_mem_ptr(bio, &bptr);
-    if (format == PK_FORMAT_PEM) {
+    if (format == security::PK_FORMAT_PEM) {
       // PEM is an ASCII format, so we will return it as a string.
       *out = String::NewFromUtf8(env->isolate(), bptr->data,
                                  NewStringType::kNormal,
                                  bptr->length).ToLocalChecked();
     } else {
-      CHECK_EQ(format, PK_FORMAT_DER);
+      CHECK_EQ(format, security::PK_FORMAT_DER);
       // DER is binary, return it as a buffer.
       *out = Buffer::Copy(env, bptr->data, bptr->length).ToLocalChecked();
     }
@@ -5280,19 +5260,19 @@ void GenerateKeyPair(const FunctionCallbackInfo<Value>& args,
 
   // Public key encoding: type (int) + pem (bool)
   CHECK(args[n_opts]->IsInt32());
-  public_key_encoding.type_ = static_cast<PKEncodingType>(
+  public_key_encoding.type_ = static_cast<security::PKEncodingType>(
       args[n_opts].As<Int32>()->Value());
   CHECK(args[n_opts + 1]->IsInt32());
-  public_key_encoding.format_ = static_cast<PKFormatType>(
+  public_key_encoding.format_ = static_cast<security::PKFormatType>(
       args[n_opts + 1].As<Int32>()->Value());
 
   // Private key encoding: type (int) + pem (bool) + cipher (optional, string) +
   //                       passphrase (optional, string)
   CHECK(args[n_opts + 2]->IsInt32());
-  private_key_encoding.type_ = static_cast<PKEncodingType>(
+  private_key_encoding.type_ = static_cast<security::PKEncodingType>(
       args[n_opts + 2].As<Int32>()->Value());
   CHECK(args[n_opts + 1]->IsInt32());
-  private_key_encoding.format_ = static_cast<PKFormatType>(
+  private_key_encoding.format_ = static_cast<security::PKFormatType>(
       args[n_opts + 3].As<Int32>()->Value());
   if (args[n_opts + 4]->IsString()) {
     String::Utf8Value cipher_name(env->isolate(),
@@ -5660,14 +5640,10 @@ void Initialize(Local<Object> target,
   env->SetMethod(target, "generateKeyPairRSA", GenerateKeyPairRSA);
   env->SetMethod(target, "generateKeyPairDSA", GenerateKeyPairDSA);
   env->SetMethod(target, "generateKeyPairEC", GenerateKeyPairEC);
-  NODE_DEFINE_CONSTANT(target, OPENSSL_EC_NAMED_CURVE);
-  NODE_DEFINE_CONSTANT(target, OPENSSL_EC_EXPLICIT_CURVE);
-  NODE_DEFINE_CONSTANT(target, PK_ENCODING_PKCS1);
-  NODE_DEFINE_CONSTANT(target, PK_ENCODING_PKCS8);
-  NODE_DEFINE_CONSTANT(target, PK_ENCODING_SPKI);
-  NODE_DEFINE_CONSTANT(target, PK_ENCODING_SEC1);
-  NODE_DEFINE_CONSTANT(target, PK_FORMAT_DER);
-  NODE_DEFINE_CONSTANT(target, PK_FORMAT_PEM);
+  for (auto& constant : SecurityProvider::Constants()) {
+    NODE_DEFINE_CONSTANT_VALUE(target, constant.first.c_str(), constant.second);
+  }
+
   env->SetMethod(target, "randomBytes", RandomBytes);
   env->SetMethodNoSideEffect(target, "timingSafeEqual", TimingSafeEqual);
   env->SetMethodNoSideEffect(target, "getSSLCiphers", GetSSLCiphers);

@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace node {
 namespace security {
@@ -15,6 +16,27 @@ namespace security {
 #define SECURITY_SPI_VERSION 1
 #endif
 #endif
+
+enum PKEncodingType {
+  // RSAPublicKey / RSAPrivateKey according to PKCS#1.
+  PK_ENCODING_PKCS1,
+  // PrivateKeyInfo or EncryptedPrivateKeyInfo according to PKCS#8.
+  PK_ENCODING_PKCS8,
+  // SubjectPublicKeyInfo according to X.509.
+  PK_ENCODING_SPKI,
+  // ECPrivateKey according to SEC1.
+  PK_ENCODING_SEC1
+};
+
+enum PKFormatType {
+  PK_FORMAT_DER,
+  PK_FORMAT_PEM
+};
+
+struct KeyPairEncodingConfig {
+  PKEncodingType type_;
+  PKFormatType format_;
+};
 
 class SecurityProvider {
  public:
@@ -57,6 +79,7 @@ class SecurityProvider {
   static bool VerifySpkac(const char* data, unsigned int len);
   static char* ExportPublicKey(const char* data, int len, size_t* size);
   static unsigned char* ExportChallenge(const char* data, int len);
+  static std::unordered_map<std::string, double> Constants();
 };
 
 

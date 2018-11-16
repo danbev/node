@@ -6,6 +6,9 @@
 #include "v8.h"
 #include <iostream>
 #include <string>
+#include <vector>
+#include <unordered_map>
+#include "util.h"
 
 namespace node {
 namespace security {
@@ -238,6 +241,20 @@ void SecurityProvider::PBKDF2::Cleanup() {
   OPENSSL_cleanse(salt_.data(), salt_.size());
   pass_.clear();
   salt_.clear();
+}
+
+std::unordered_map<std::string, double> SecurityProvider::Constants() {
+  std::unordered_map<std::string, double> constants {
+    {STRINGIFY_(OPENSSL_EC_NAMED_CURVE), OPENSSL_EC_NAMED_CURVE},
+    {STRINGIFY_(OPENSSL_EC_EXPLICIT_CURVE), OPENSSL_EC_EXPLICIT_CURVE},
+    {STRINGIFY(PK_ENCODING_PKCS1), PK_ENCODING_PKCS1},
+    {STRINGIFY(PK_ENCODING_PKCS8), PK_ENCODING_PKCS8},
+    {STRINGIFY(PK_ENCODING_SPKI), PK_ENCODING_SPKI},
+    {STRINGIFY(PK_ENCODING_SEC1), PK_ENCODING_SEC1},
+    {STRINGIFY(PK_FORMAT_DER), PK_FORMAT_DER},
+    {STRINGIFY(PK_FORMAT_PEM), PK_FORMAT_PEM}
+  };
+  return constants;
 }
 
 }  // namespace security
