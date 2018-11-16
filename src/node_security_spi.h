@@ -80,6 +80,7 @@ class SecurityProvider {
   static char* ExportPublicKey(const char* data, int len, size_t* size);
   static unsigned char* ExportChallenge(const char* data, int len);
   static std::unordered_map<std::string, double> Constants();
+  static bool TimingSafeEquals(const void* a, const void* b, size_t len);
 };
 
 

@@ -257,6 +257,12 @@ std::unordered_map<std::string, double> SecurityProvider::Constants() {
   return constants;
 }
 
+bool SecurityProvider::TimingSafeEquals(const void* a,
+                                        const void* b,
+                                        size_t len) {
+  return CRYPTO_memcmp(a, b, len) == 0;
+}
+
 }  // namespace security
 
 }  // namespace node

@@ -5547,7 +5547,8 @@ void TimingSafeEqual(const FunctionCallbackInfo<Value>& args) {
   const char* buf1 = Buffer::Data(args[0]);
   const char* buf2 = Buffer::Data(args[1]);
 
-  return args.GetReturnValue().Set(CRYPTO_memcmp(buf1, buf2, buf_length) == 0);
+  bool equal = SecurityProvider::TimingSafeEquals(buf1, buf2, buf_length);
+  return args.GetReturnValue().Set(equal);
 }
 
 
