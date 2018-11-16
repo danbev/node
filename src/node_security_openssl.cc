@@ -118,9 +118,9 @@ std::vector<std::string> SecurityProvider::GetHashes() {
 }
 
 static void get_ciphers(const EVP_CIPHER* c,
-                       const char* from,
-                       const char* to,
-                       void* arg) {
+                        const char* from,
+                        const char* to,
+                        void* arg) {
   static_cast<std::vector<std::string>*>(arg)->push_back(from);
 }
 
@@ -128,6 +128,23 @@ std::vector<std::string> SecurityProvider::GetCiphers() {
   std::vector<std::string> ciphers;
   EVP_CIPHER_do_all_sorted(get_ciphers, &ciphers);
   return ciphers;
+}
+
+std::vector<std::string> SecurityProvider::GetTLSCiphers() {
+  crypto::SSLCtxPointer ctx(SSL_CTX_new(TLS_method()));
+  CHECK(ctx);
+
+  crypto::SSLPointer ssl(SSL_new(ctx.get()));
+  CHECK(ssl);
+
+  STACK_OF(SSL_CIPHER)* ciphers = SSL_get_ciphers(ssl.get());
+  int n = sk_SSL_CIPHER_num(ciphers);
+  std::vector<std::string> tls_ciphers(n);
+  for (int i = 0; i < n; ++i) {
+    const SSL_CIPHER* cipher = sk_SSL_CIPHER_value(ciphers, i);
+    tls_ciphers[i] = SSL_CIPHER_get_name(cipher);
+  }
+  return tls_ciphers;
 }
 
 std::vector<std::string> SecurityProvider::GetCurves() {

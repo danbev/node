@@ -5366,25 +5366,12 @@ void GenerateKeyPairEC(const FunctionCallbackInfo<Value>& args) {
 
 void GetSSLCiphers(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-
-  SSLCtxPointer ctx(SSL_CTX_new(TLS_method()));
-  CHECK(ctx);
-
-  SSLPointer ssl(SSL_new(ctx.get()));
-  CHECK(ssl);
-
-  STACK_OF(SSL_CIPHER)* ciphers = SSL_get_ciphers(ssl.get());
-  int n = sk_SSL_CIPHER_num(ciphers);
-  Local<Array> arr = Array::New(env->isolate(), n);
-
-  for (int i = 0; i < n; ++i) {
-    const SSL_CIPHER* cipher = sk_SSL_CIPHER_value(ciphers, i);
+  Local<Array> arr = Array::New(env->isolate());
+  for (const std::string& cipher : SecurityProvider::GetTLSCiphers()) {
     arr->Set(env->context(),
-             i,
-             OneByteString(args.GetIsolate(),
-                           SSL_CIPHER_get_name(cipher))).FromJust();
+             arr->Length(),
+             OneByteString(args.GetIsolate(), cipher.c_str())).FromJust();
   }
-
   args.GetReturnValue().Set(arr);
 }
 

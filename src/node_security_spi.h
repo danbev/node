@@ -73,6 +73,7 @@ class SecurityProvider {
   static void UseCaExtraCerts(std::string certs);
   static std::vector<std::string> GetHashes();
   static std::vector<std::string> GetCiphers();
+  static std::vector<std::string> GetTLSCiphers();
   static std::vector<std::string> GetCurves();
   static std::vector<std::string> GetErrors();
   static Status RandomBytes(size_t size, unsigned char* data);
