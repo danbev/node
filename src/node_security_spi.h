@@ -114,6 +114,64 @@ class SecurityProvider {
                                size_t* out_len);
   };
 
+  class Key {
+   public:
+    char* data_;
+    size_t length_;
+  };
+
+  class KeyPairGenerator {
+   public:
+    KeyPairGenerator(const uint32_t modulus_bits,
+                     const uint32_t exponent,
+                     PKEncodingType pub_encoding,
+                     PKFormatType pub_format,
+                     PKEncodingType pri_encoding,
+                     PKFormatType pri_format,
+                     std::string cipher_name,
+                     std::string passphrase);
+    virtual ~KeyPairGenerator() {}
+    virtual bool LoadCipher() = 0;
+    virtual bool HasKey() = 0;
+    virtual bool Generate() = 0;
+    virtual bool EncodeKeys(Key* public_key, Key* private_key) = 0;
+    PKFormatType PublicKeyFormat() { return pub_format_; }
+    PKFormatType PrivateKeyFormat() { return pri_format_; }
+    PKEncodingType PublicKeyEncoding() { return pub_encoding_; }
+    PKEncodingType PrivateKeyEncoding() { return pri_encoding_; }
+    SecurityProvider::Status Status() { return status_; }
+
+   protected:
+    const uint32_t modulus_bits_;
+    const uint32_t exponent_;
+    PKEncodingType pub_encoding_;
+    PKFormatType pub_format_;
+    PKEncodingType pri_encoding_;
+    PKFormatType pri_format_;
+    std::string cipher_name_;
+    std::string passphrase_;
+    void* pkey_;
+    void* cipher_;
+    SecurityProvider::Status status_;
+  };
+
+  class KeyPairGeneratorRSA : public KeyPairGenerator {
+   public:
+    KeyPairGeneratorRSA(const uint32_t modulus_bits,
+                        const uint32_t exponent,
+                        PKEncodingType pub_encoding,
+                        PKFormatType pub_format,
+                        PKEncodingType pri_encoding,
+                        PKFormatType pri_format,
+                        std::string cipher_name,
+                        std::string passphrase);
+    ~KeyPairGeneratorRSA() = default;
+    bool LoadCipher();
+    bool Generate();
+    bool HasKey();
+    bool EncodeKeys(Key* public_key, Key* private_key);
+  };
+
   static void Init();
   static void InitProviderOnce();
   static std::string GetProviderName();
