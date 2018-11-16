@@ -122,19 +122,22 @@ class SecurityProvider {
 
   class KeyPairGenerator {
    public:
-    KeyPairGenerator(const uint32_t modulus_bits,
-                     const uint32_t exponent,
-                     PKEncodingType pub_encoding,
+    KeyPairGenerator(PKEncodingType pub_encoding,
                      PKFormatType pub_format,
                      PKEncodingType pri_encoding,
                      PKFormatType pri_format,
                      std::string cipher_name,
-                     std::string passphrase);
+                     std::string passphrase) : pub_encoding_(pub_encoding),
+                                               pub_format_(pub_format),
+                                               pri_encoding_(pri_encoding),
+                                               pri_format_(pri_format),
+                                               cipher_name_(cipher_name),
+                                               passphrase_(passphrase) {}
     virtual ~KeyPairGenerator() {}
-    virtual bool LoadCipher() = 0;
-    virtual bool HasKey() = 0;
+    bool LoadCipher();
+    bool HasKey() const;
+    bool EncodeKeys(Key* public_key, Key* private_key) const;
     virtual bool Generate() = 0;
-    virtual bool EncodeKeys(Key* public_key, Key* private_key) = 0;
     PKFormatType PublicKeyFormat() { return pub_format_; }
     PKFormatType PrivateKeyFormat() { return pri_format_; }
     PKEncodingType PublicKeyEncoding() { return pub_encoding_; }
@@ -142,8 +145,6 @@ class SecurityProvider {
     SecurityProvider::Status Status() { return status_; }
 
    protected:
-    const uint32_t modulus_bits_;
-    const uint32_t exponent_;
     PKEncodingType pub_encoding_;
     PKFormatType pub_format_;
     PKEncodingType pri_encoding_;
@@ -164,12 +165,35 @@ class SecurityProvider {
                         PKEncodingType pri_encoding,
                         PKFormatType pri_format,
                         std::string cipher_name,
-                        std::string passphrase);
+                        std::string passphrase) :
+        KeyPairGenerator(pub_encoding, pub_format, pri_encoding, pri_format,
+                         cipher_name, passphrase), modulus_bits_(modulus_bits),
+                         exponent_(exponent) {}
     ~KeyPairGeneratorRSA() = default;
-    bool LoadCipher();
     bool Generate();
-    bool HasKey();
-    bool EncodeKeys(Key* public_key, Key* private_key);
+   private:
+    const uint32_t modulus_bits_;
+    const uint32_t exponent_;
+  };
+
+  class KeyPairGeneratorDSA : public KeyPairGenerator {
+   public:
+    KeyPairGeneratorDSA(const uint32_t modulus_bits,
+                        const uint32_t divisor_bits,
+                        PKEncodingType pub_encoding,
+                        PKFormatType pub_format,
+                        PKEncodingType pri_encoding,
+                        PKFormatType pri_format,
+                        std::string cipher_name,
+                        std::string passphrase) :
+        KeyPairGenerator(pub_encoding, pub_format, pri_encoding, pri_format,
+                         cipher_name, passphrase), modulus_bits_(modulus_bits),
+                         divisor_bits_(divisor_bits) {}
+    ~KeyPairGeneratorDSA() = default;
+    bool Generate();
+   private:
+    const uint32_t modulus_bits_;
+    const uint32_t divisor_bits_;
   };
 
   static void Init();

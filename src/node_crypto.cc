@@ -5331,14 +5331,41 @@ void GenerateKeyPair(const FunctionCallbackInfo<Value>& args,
   args.GetReturnValue().Set(ret);
 }
 
+void GenerateKeyPair_NEW(const FunctionCallbackInfo<Value>& args,
+    SecurityProvider::KeyPairGenerator* keygen) {
+  Environment* env = Environment::GetCurrent(args);
+
+  if (!keygen->LoadCipher())
+    return env->ThrowError("Unknown cipher");
+
+  std::unique_ptr<GenerateKeyPairJob2> job(
+      std::make_unique<GenerateKeyPairJob2>(env, keygen));
+
+  if (args[8]->IsObject())
+    return GenerateKeyPairJob::Run(std::move(job), args[8]);
+
+  env->PrintSyncTrace();
+  job->DoThreadPoolWork();
+  Local<Value> err, pubkey, privkey;
+  job->ToResult(&err, &pubkey, &privkey);
+
+  bool (*IsNotTrue)(Maybe<bool>) = [](Maybe<bool> maybe) {
+    return maybe.IsNothing() || !maybe.ToChecked();
+  };
+  Local<Array> ret = Array::New(env->isolate(), 3);
+  if (IsNotTrue(ret->Set(env->context(), 0, err)) ||
+      IsNotTrue(ret->Set(env->context(), 1, pubkey)) ||
+      IsNotTrue(ret->Set(env->context(), 2, privkey)))
+    return;
+  args.GetReturnValue().Set(ret);
+}
+
 void GenerateKeyPairRSA(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   CHECK(args[0]->IsUint32());
   const uint32_t modulus_bits = args[0].As<Uint32>()->Value();
   CHECK(args[1]->IsUint32());
   const uint32_t exponent = args[1].As<Uint32>()->Value();
-  std::unique_ptr<KeyPairGenerationConfig> config(
-      new RSAKeyPairGenerationConfig(modulus_bits, exponent));
   CHECK(args[2]->IsInt32());
   security::PKEncodingType pub_encoding_type =
       static_cast<security::PKEncodingType>(args[2].As<Int32>()->Value());
@@ -5373,39 +5400,51 @@ void GenerateKeyPairRSA(const FunctionCallbackInfo<Value>& args) {
                                               cipher_name,
                                               passphrase);
 
-  if (!keygen->LoadCipher())
-    return env->ThrowError("Unknown cipher");
-
-  std::unique_ptr<GenerateKeyPairJob2> job(
-      std::make_unique<GenerateKeyPairJob2>(env, keygen));
-
-  if (args[8]->IsObject())
-    return GenerateKeyPairJob::Run(std::move(job), args[8]);
-
-  env->PrintSyncTrace();
-  job->DoThreadPoolWork();
-  Local<Value> err, pubkey, privkey;
-  job->ToResult(&err, &pubkey, &privkey);
-
-  bool (*IsNotTrue)(Maybe<bool>) = [](Maybe<bool> maybe) {
-    return maybe.IsNothing() || !maybe.ToChecked();
-  };
-  Local<Array> ret = Array::New(env->isolate(), 3);
-  if (IsNotTrue(ret->Set(env->context(), 0, err)) ||
-      IsNotTrue(ret->Set(env->context(), 1, pubkey)) ||
-      IsNotTrue(ret->Set(env->context(), 2, privkey)))
-    return;
-  args.GetReturnValue().Set(ret);
+  GenerateKeyPair_NEW(args, keygen);
 }
 
+
 void GenerateKeyPairDSA(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
   CHECK(args[0]->IsUint32());
   const uint32_t modulus_bits = args[0].As<Uint32>()->Value();
-  CHECK(args[1]->IsInt32());
-  const int32_t divisor_bits = args[1].As<Int32>()->Value();
-  std::unique_ptr<KeyPairGenerationConfig> config(
-      new DSAKeyPairGenerationConfig(modulus_bits, divisor_bits));
-  GenerateKeyPair(args, 2, std::move(config));
+  CHECK(args[1]->IsUint32());
+  const uint32_t divisor_bits = args[1].As<Uint32>()->Value();
+  CHECK(args[2]->IsInt32());
+  security::PKEncodingType pub_encoding_type =
+      static_cast<security::PKEncodingType>(args[2].As<Int32>()->Value());
+  CHECK(args[3]->IsInt32());
+  security::PKFormatType pub_encoding_format =
+      static_cast<security::PKFormatType>(args[3].As<Int32>()->Value());
+  CHECK(args[4]->IsInt32());
+  security::PKEncodingType pri_encoding_type =
+      static_cast<security::PKEncodingType>(args[4].As<Int32>()->Value());
+  CHECK(args[5]->IsInt32());
+  security::PKFormatType pri_encoding_format =
+      static_cast<security::PKFormatType>(args[5].As<Int32>()->Value());
+
+  std::string cipher_name;
+  std::string passphrase;
+  if (args[6]->IsString()) {
+    String::Utf8Value c_name(env->isolate(), args[6].As<String>());
+    cipher_name = std::string(*c_name);
+
+    CHECK(args[7]->IsString());
+    String::Utf8Value ph(env->isolate(), args[7].As<String>());
+    passphrase = std::string(*ph);
+  }
+
+  SecurityProvider::KeyPairGeneratorDSA* keygen =
+    new SecurityProvider::KeyPairGeneratorDSA(modulus_bits,
+                                              divisor_bits,
+                                              pub_encoding_type,
+                                              pub_encoding_format,
+                                              pri_encoding_type,
+                                              pri_encoding_format,
+                                              cipher_name,
+                                              passphrase);
+
+  GenerateKeyPair_NEW(args, keygen);
 }
 
 void GenerateKeyPairEC(const FunctionCallbackInfo<Value>& args) {

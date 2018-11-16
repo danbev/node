@@ -544,6 +544,19 @@ bool SecurityProvider::KeyCipher::PublicDecrypt(const char* key_pem,
   return true;
 }
 
+inline void CheckEntropy() {
+  for (;;) {
+    int status = RAND_status();
+    CHECK_GE(status, 0);  // Cannot fail.
+    if (status != 0)
+      break;
+
+    // Give up, RAND_poll() not supported.
+    if (RAND_poll() == 0)
+      break;
+  }
+}
+
 class KeyPairGenerationConfig {
  public:
   virtual crypto::EVPKeyCtxPointer Setup() = 0;
@@ -583,6 +596,46 @@ class RSAKeyPairGenerationConfig : public KeyPairGenerationConfig {
   const unsigned int exponent_;
 };
 
+class DSAKeyPairGenerationConfig : public KeyPairGenerationConfig {
+ public:
+  DSAKeyPairGenerationConfig(unsigned int modulus_bits, int divisor_bits)
+    : modulus_bits_(modulus_bits), divisor_bits_(divisor_bits) {}
+
+    crypto::EVPKeyCtxPointer Setup() override {
+      crypto::EVPKeyCtxPointer param_ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_DSA,
+                                                             nullptr));
+    if (!param_ctx)
+      return nullptr;
+
+    if (EVP_PKEY_paramgen_init(param_ctx.get()) <= 0)
+      return nullptr;
+
+    if (EVP_PKEY_CTX_set_dsa_paramgen_bits(param_ctx.get(), modulus_bits_) <= 0)
+      return nullptr;
+
+    if (divisor_bits_ != -1) {
+      if (EVP_PKEY_CTX_ctrl(param_ctx.get(), EVP_PKEY_DSA, EVP_PKEY_OP_PARAMGEN,
+                            EVP_PKEY_CTRL_DSA_PARAMGEN_Q_BITS, divisor_bits_,
+                            nullptr) <= 0) {
+        return nullptr;
+      }
+    }
+
+    EVP_PKEY* params = nullptr;
+    if (EVP_PKEY_paramgen(param_ctx.get(), &params) <= 0)
+      return nullptr;
+    param_ctx.reset();
+
+    crypto::EVPKeyCtxPointer key_ctx(EVP_PKEY_CTX_new(params, nullptr));
+    EVP_PKEY_free(params);
+    return key_ctx;
+  }
+
+ private:
+  const unsigned int modulus_bits_;
+  const int divisor_bits_;
+};
+
 typedef security::KeyPairEncodingConfig PublicKeyEncodingConfig;
 
 struct PrivateKeyEncodingConfig : public security::KeyPairEncodingConfig {
@@ -592,59 +645,23 @@ struct PrivateKeyEncodingConfig : public security::KeyPairEncodingConfig {
   unsigned int passphrase_length_;
 };
 
-SecurityProvider::KeyPairGenerator::KeyPairGenerator(
-    const uint32_t modulus_bits,
-    const uint32_t exponent,
-    PKEncodingType pub_encoding,
-    PKFormatType pub_format,
-    PKEncodingType pri_encoding,
-    PKFormatType pri_format,
-    std::string cipher_name,
-    std::string passphrase) : modulus_bits_(modulus_bits),
-                              exponent_(exponent),
-                              pub_encoding_(pub_encoding),
-                              pub_format_(pub_format),
-                              pri_encoding_(pri_encoding),
-                              pri_format_(pri_format),
-                              cipher_name_(cipher_name),
-                              passphrase_(passphrase) {
-}
-
-SecurityProvider::KeyPairGeneratorRSA::KeyPairGeneratorRSA(
-    const uint32_t modulus_bits,
-    const uint32_t exponent,
-    PKEncodingType pub_encoding,
-    PKFormatType pub_format,
-    PKEncodingType pri_encoding,
-    PKFormatType pri_format,
-    std::string cipher_name,
-    std::string passphrase) : KeyPairGenerator(modulus_bits,
-                              exponent,
-                              pub_encoding,
-                              pub_format,
-                              pri_encoding,
-                              pri_format,
-                              cipher_name,
-                              passphrase) {
-}
-
-inline void CheckEntropy() {
-  for (;;) {
-    int status = RAND_status();
-    CHECK_GE(status, 0);  // Cannot fail.
-    if (status != 0)
-      break;
-
-    // Give up, RAND_poll() not supported.
-    if (RAND_poll() == 0)
-      break;
+bool SecurityProvider::KeyPairGenerator::LoadCipher() {
+  if (!cipher_name_.empty()) {
+    const EVP_CIPHER* cipher = EVP_get_cipherbyname(cipher_name_.c_str());
+    cipher_ = static_cast<void*>(const_cast<EVP_CIPHER*>(cipher));
+    return cipher_ != nullptr;
   }
+  // Setting this to nullptr will indicate to OpenSSL that no encryption of
+  // the private key should be done.
+  cipher_ = nullptr;
+  return true;
 }
 
-bool SecurityProvider::KeyPairGeneratorRSA::Generate() {
-  std::unique_ptr<KeyPairGenerationConfig> config =
-      std::make_unique<RSAKeyPairGenerationConfig>(modulus_bits_, exponent_);
+bool SecurityProvider::KeyPairGenerator::HasKey() const {
+  return pkey_ != nullptr;
+}
 
+bool Generate(KeyPairGenerationConfig* config, void** out) {
   // Make sure that the CSPRNG is properly seeded so the results are secure.
   CheckEntropy();
 
@@ -665,48 +682,25 @@ bool SecurityProvider::KeyPairGeneratorRSA::Generate() {
   EVP_PKEY* pkey = nullptr;
   if (EVP_PKEY_keygen(ctx.get(), &pkey) != 1)
     return false;
-  pkey_ = pkey;
-  //  key_.reset(pkey);
+  *out = pkey;
   return true;
 }
 
-/*
-void BIOToStringOrBuffer(BIO* bio,
-                         security::PKFormatType format,
-                         void* out) {
-  BUF_MEM* bptr;
-  BIO_get_mem_ptr(bio, &bptr);
-  if (format == security::PK_FORMAT_PEM) {
-    // PEM is an ASCII format, so we will return it as a string.
-    *out = String::NewFromUtf8(env->isolate(), bptr->data,
-                               NewStringType::kNormal,
-                               bptr->length).ToLocalChecked();
-  } else {
-    CHECK_EQ(format, security::PK_FORMAT_DER);
-    // DER is binary, return it as a buffer.
-    *out = Buffer::Copy(env, bptr->data, bptr->length).ToLocalChecked();
-  }
-}
-*/
-
-bool SecurityProvider::KeyPairGeneratorRSA::LoadCipher() {
-  if (!cipher_name_.empty()) {
-    const EVP_CIPHER* cipher = EVP_get_cipherbyname(cipher_name_.c_str());
-    cipher_ = static_cast<void*>(const_cast<EVP_CIPHER*>(cipher));
-    return cipher_ != nullptr;
-  }
-  // Setting this to nullptr will indicate to OpenSSL that no encryption of
-  // the private key should be done.
-  cipher_ = nullptr;
-  return true;
+bool SecurityProvider::KeyPairGeneratorRSA::Generate() {
+  std::unique_ptr<KeyPairGenerationConfig> config =
+      std::make_unique<RSAKeyPairGenerationConfig>(modulus_bits_, exponent_);
+  return ::node::security::Generate(config.get(), &pkey_);
 }
 
-bool SecurityProvider::KeyPairGeneratorRSA::HasKey() {
-  return pkey_ != nullptr;
+bool SecurityProvider::KeyPairGeneratorDSA::Generate() {
+  std::unique_ptr<KeyPairGenerationConfig> config =
+      std::make_unique<DSAKeyPairGenerationConfig>(modulus_bits_,
+                                                   divisor_bits_);
+  return ::node::security::Generate(config.get(), &pkey_);
 }
 
-bool SecurityProvider::KeyPairGeneratorRSA::EncodeKeys(Key* public_key,
-                                                       Key* private_key) {
+bool SecurityProvider::KeyPairGenerator::EncodeKeys(Key* public_key,
+                                                    Key* private_key) const {
   //  EVP_PKEY* pkey = pkey_.get();
   EVP_PKEY* pkey = static_cast<EVP_PKEY*>(pkey_);
   crypto::BIOPointer bio(BIO_new(BIO_s_mem()));
@@ -746,8 +740,6 @@ bool SecurityProvider::KeyPairGeneratorRSA::EncodeKeys(Key* public_key,
   public_key->data_ = bptr->data;
   public_key->length_ = bptr->length;
 
-  // Convert the contents of the BIO to a JavaScript object.
-  // BIOToStringOrBuffer(bio.get(), pub_format_, public_key);
   // Release and pass ownership to public_key out parameter
   USE(bio.release());
   bio.reset(BIO_new(BIO_s_mem()));
@@ -822,7 +814,6 @@ bool SecurityProvider::KeyPairGeneratorRSA::EncodeKeys(Key* public_key,
     }
   }
 
-  // BIOToStringOrBuffer(bio.get(), private_key_encoding_.format_, privkey);
   BIO_get_mem_ptr(bio.get(), &bptr);
   private_key->data_ = bptr->data;
   private_key->length_ = bptr->length;
@@ -830,46 +821,6 @@ bool SecurityProvider::KeyPairGeneratorRSA::EncodeKeys(Key* public_key,
   USE(bio.release());
   return true;
 }
-
-/*
-void SecurityProvider::GenerateKeyPairRSA(const uint32_t modulus_bits,
-                                          const uint32_t exponent,
-                                          PKEncodingType pub_encoding,
-                                          PKFormatType pub_format,
-                                          PKEncodingType pri_encoding,
-                                          PKFormatType pri_format,
-                                          std::string cipher_name,
-                                          std::string passphrase) {
-  std::unique_ptr<KeyPairGenerationConfig> config =
-    std::make_unique<RSAKeyPairGenerationConfig>(modulus_bits, exponent);
-  PublicKeyEncodingConfig public_key_encoding;
-  PrivateKeyEncodingConfig private_key_encoding;
-  public_key_encoding.type_ = pub_encoding;
-  public_key_encoding.format_ = pub_format;
-
-  private_key_encoding.type_ = pri_encoding;
-  private_key_encoding.format_ = pri_format;
-  if (!cipher_name.empty()) {
-    private_key_encoding.cipher_ = EVP_get_cipherbyname(cipher_name.c_str());
-    if (private_key_encoding.cipher_ == nullptr) {
-      // TODO: return status.
-      //return env->ThrowError("Unknown cipher");
-    }
-    int len = cipher_name.length();
-    private_key_encoding.passphrase_length_ = cipher_name.length();
-    void* mem = OPENSSL_malloc(private_key_encoding.passphrase_length_ + 1);
-    CHECK_NOT_NULL(mem);
-    private_key_encoding.passphrase_.reset(static_cast<char*>(mem),
-        [len](char* p) {
-          OPENSSL_clear_free(p, len);
-        });
-  } else {
-    private_key_encoding.cipher_ = nullptr;
-    private_key_encoding.passphrase_length_ = 0;
-  }
-
-}
-*/
 
 }  // namespace security
 
