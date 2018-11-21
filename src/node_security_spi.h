@@ -228,12 +228,17 @@ class SecurityProvider {
   static std::vector<std::string> GetTLSCiphers();
   static std::vector<std::string> GetCurves();
   static std::vector<std::string> GetErrors();
+  static uint32_t GetError();
   static Status RandomBytes(size_t size, unsigned char* data);
   static bool VerifySpkac(const char* data, unsigned int len);
   static char* ExportPublicKey(const char* data, int len, size_t* size);
   static unsigned char* ExportChallenge(const char* data, int len);
   static std::unordered_map<std::string, double> Constants();
   static bool TimingSafeEquals(const void* a, const void* b, size_t len);
+#ifdef NODE_FIPS_MODE
+  static bool HasFipsSupport();
+  static Status SetFipsSupport(bool enable);
+#endif /* NODE_FIPS_MODE */
 };
 
 

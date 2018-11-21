@@ -5301,19 +5301,16 @@ void SetEngine(const FunctionCallbackInfo<Value>& args) {
 
 #ifdef NODE_FIPS_MODE
 void GetFipsCrypto(const FunctionCallbackInfo<Value>& args) {
-  args.GetReturnValue().Set(FIPS_mode() ? 1 : 0);
+  args.GetReturnValue().Set(SecurityProvider::HasFipsSupport() ? 1 : 0);
 }
 
 void SetFipsCrypto(const FunctionCallbackInfo<Value>& args) {
   CHECK(!per_process_opts->force_fips_crypto);
   Environment* env = Environment::GetCurrent(args);
-  const bool enabled = FIPS_mode();
   bool enable;
   if (!args[0]->BooleanValue(env->context()).To(&enable)) return;
-  if (enable == enabled)
-    return;  // No action needed.
-  if (!FIPS_mode_set(enable)) {
-    unsigned long err = ERR_get_error();  // NOLINT(runtime/int)
+  if (!SecurityProvider::SetFipsSupport(enable)) {
+    uint32_t err = SecurityProvider::GetError();
     return ThrowCryptoError(env, err);
   }
 }

@@ -169,6 +169,10 @@ std::vector<std::string> SecurityProvider::GetErrors() {
   return errors;
 }
 
+uint32_t SecurityProvider::GetError() {
+  return ERR_get_error();  // NOLINT(runtime/int)
+}
+
 bool SecurityProvider::VerifySpkac(const char* data, unsigned int len) {
   node::crypto::NetscapeSPKIPointer spki(NETSCAPE_SPKI_b64_decode(data, len));
   if (!spki)
@@ -875,6 +879,17 @@ bool SecurityProvider::KeyPairGenerator::EncodeKeys(Key* public_key,
   USE(bio.release());
   return true;
 }
+
+#ifdef NODE_FIPS_MODE
+bool SecurityProvider::HasFipsSupport() {
+  return FIPS_mode();
+}
+
+bool SecurityProvider::SetFipsSupport(bool enable) {
+  const bool enabled = FIPS_mode();
+  return enabled == enable ? true : FIPS_mode_set(enable);
+}
+#endif /* NODE_FIPS_MODE */
 
 }  // namespace security
 
