@@ -13,6 +13,28 @@
 namespace node {
 namespace security {
 
+inline void CheckEntropy() {
+  for (;;) {
+    int status = RAND_status();
+    CHECK_GE(status, 0);  // Cannot fail.
+    if (status != 0)
+      break;
+
+    // Give up, RAND_poll() not supported.
+    if (RAND_poll() == 0)
+      break;
+  }
+}
+
+bool EntropySource(unsigned char* buffer, size_t length) {
+  // Ensure that OpenSSL's PRNG is properly seeded.
+  CheckEntropy();
+  // RAND_bytes() can return 0 to indicate that the entropy data is not truly
+  // random. That's okay, it's still better than V8's stock source of entropy,
+  // which is /dev/urandom on UNIX platforms and the current time on Windows.
+  return RAND_bytes(buffer, length) != -1;
+}
+
 void SecurityProvider::Init() {
 #ifdef NODE_FIPS_MODE
   // In the case of FIPS builds we should make sure
@@ -21,7 +43,7 @@ void SecurityProvider::Init() {
 #endif  // NODE_FIPS_MODE
   // V8 on Windows doesn't have a good source of entropy. Seed it from
   // OpenSSL's pool.
-  v8::V8::SetEntropySource(node::crypto::EntropySource);
+  v8::V8::SetEntropySource(EntropySource);
 }
 
 void SecurityProvider::InitProviderOnce() {
@@ -548,18 +570,6 @@ bool SecurityProvider::KeyCipher::PublicDecrypt(const char* key_pem,
   return true;
 }
 
-inline void CheckEntropy() {
-  for (;;) {
-    int status = RAND_status();
-    CHECK_GE(status, 0);  // Cannot fail.
-    if (status != 0)
-      break;
-
-    // Give up, RAND_poll() not supported.
-    if (RAND_poll() == 0)
-      break;
-  }
-}
 
 class KeyPairGenerationConfig {
  public:
