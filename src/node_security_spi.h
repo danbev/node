@@ -239,6 +239,8 @@ class SecurityProvider {
   static bool HasFipsSupport();
   static Status SetFipsSupport(bool enable);
 #endif /* NODE_FIPS_MODE */
+  static void CheckEntropy();
+  static bool EntropySource(unsigned char* buffer, size_t length);
 };
 
 

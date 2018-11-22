@@ -13,7 +13,27 @@
 namespace node {
 namespace security {
 
-inline void CheckEntropy() {
+// Ensure that OpenSSL has enough entropy (at least 256 bits) for its PRNG.
+// The entropy pool starts out empty and needs to fill up before the PRNG
+// can be used securely.  Once the pool is filled, it never dries up again;
+// its contents is stirred and reused when necessary.
+//
+// OpenSSL normally fills the pool automatically but not when someone starts
+// generating random numbers before the pool is full: in that case OpenSSL
+// keeps lowering the entropy estimate to thwart attackers trying to guess
+// the initial state of the PRNG.
+//
+// When that happens, we will have to wait until enough entropy is available.
+// That should normally never take longer than a few milliseconds.
+//
+// OpenSSL draws from /dev/random and /dev/urandom.  While /dev/random may
+// block pending "true" randomness, /dev/urandom is a CSPRNG that doesn't
+// block under normal circumstances.
+//
+// The only time when /dev/urandom may conceivably block is right after boot,
+// when the whole system is still low on entropy.  That's not something we can
+// do anything about.
+void SecurityProvider::CheckEntropy() {
   for (;;) {
     int status = RAND_status();
     CHECK_GE(status, 0);  // Cannot fail.
@@ -26,9 +46,9 @@ inline void CheckEntropy() {
   }
 }
 
-bool EntropySource(unsigned char* buffer, size_t length) {
+bool SecurityProvider::EntropySource(unsigned char* buffer, size_t length) {
   // Ensure that OpenSSL's PRNG is properly seeded.
-  CheckEntropy();
+  SecurityProvider::CheckEntropy();
   // RAND_bytes() can return 0 to indicate that the entropy data is not truly
   // random. That's okay, it's still better than V8's stock source of entropy,
   // which is /dev/urandom on UNIX platforms and the current time on Windows.
@@ -713,7 +733,7 @@ bool SecurityProvider::KeyPairGenerator::HasKey() const {
 
 bool Generate(KeyPairGenerationConfig* config, void** out) {
   // Make sure that the CSPRNG is properly seeded so the results are secure.
-  CheckEntropy();
+  SecurityProvider::CheckEntropy();
 
   // Create the key generation context.
   crypto::EVPKeyCtxPointer ctx = config->Setup();
