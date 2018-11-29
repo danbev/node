@@ -111,6 +111,7 @@ class SecureContext : public BaseObject {
   SSLCtxPointer ctx_;
   X509Pointer cert_;
   X509Pointer issuer_;
+  std::unique_ptr<security::SecurityProvider::Context> context_;
 #ifndef OPENSSL_NO_ENGINE
   bool client_cert_engine_provided_ = false;
 #endif  // !OPENSSL_NO_ENGINE
@@ -123,12 +124,6 @@ class SecureContext : public BaseObject {
   static const int kTicketKeyAESIndex = 2;
   static const int kTicketKeyNameIndex = 3;
   static const int kTicketKeyIVIndex = 4;
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-  unsigned char ticket_key_name_[16];
-  unsigned char ticket_key_aes_[16];
-  unsigned char ticket_key_hmac_[16];
-#endif
 
  protected:
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
@@ -188,7 +183,8 @@ class SecureContext : public BaseObject {
 #endif
 
   SecureContext(Environment* env, v8::Local<v8::Object> wrap)
-      : BaseObject(env, wrap) {
+      : BaseObject(env, wrap),
+        context_(std::make_unique<security::SecurityProvider::Context>(env)) {
     MakeWeak();
     env->isolate()->AdjustAmountOfExternalAllocatedMemory(kExternalSize);
   }
@@ -200,6 +196,7 @@ class SecureContext : public BaseObject {
     ctx_.reset();
     cert_.reset();
     issuer_.reset();
+    context_.reset();
   }
 };
 

@@ -1,17 +1,78 @@
 #include "node_security_spi.h"
-#if HAVE_OPENSSL
-#include "node_crypto.h"
+#include "env.h"
+#include "openssl/bio.h"
+
+// TODO(danbev) Remove the dependency to V8 from node_crypto_bio.h if possible
 #include "node_crypto_bio.h"
-#endif
-#include "v8.h"
+
+#include <openssl/ssl.h>
+#include <openssl/ec.h>
+#include <openssl/ecdh.h>
+#ifndef OPENSSL_NO_ENGINE
+# include <openssl/engine.h>
+#endif  // !OPENSSL_NO_ENGINE
+#include <openssl/err.h>
+#include <openssl/evp.h>
+// TODO(shigeki) Remove this after upgrading to 1.1.1
+#include <openssl/obj_mac.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/pkcs12.h>
+
+#include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include "util.h"
+#include "v8.h"
 
 namespace node {
 namespace security {
+
+// Forcibly clear OpenSSL's error stack on return. This stops stale errors
+// from popping up later in the lifecycle of crypto operations where they
+// would cause spurious failures. It's a rather blunt method, though.
+// ERR_clear_error() isn't necessarily cheap either.
+struct ClearErrorOnReturn {
+  ~ClearErrorOnReturn() { ERR_clear_error(); }
+};
+
+// Pop errors from OpenSSL's error stack that were added
+// between when this was constructed and destructed.
+struct MarkPopErrorOnReturn {
+  MarkPopErrorOnReturn() { ERR_set_mark(); }
+  ~MarkPopErrorOnReturn() { ERR_pop_to_mark(); }
+};
+
+// Define smart pointers for the most commonly used OpenSSL types:
+using X509Pointer = DeleteFnPtr<X509, X509_free>;
+using BIOPointer = DeleteFnPtr<BIO, BIO_free_all>;
+using SSLCtxPointer = DeleteFnPtr<SSL_CTX, SSL_CTX_free>;
+using SSLSessionPointer = DeleteFnPtr<SSL_SESSION, SSL_SESSION_free>;
+using SSLPointer = DeleteFnPtr<SSL, SSL_free>;
+using EVPKeyPointer = DeleteFnPtr<EVP_PKEY, EVP_PKEY_free>;
+using EVPKeyCtxPointer = DeleteFnPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
+using EVPMDPointer = DeleteFnPtr<EVP_MD_CTX, EVP_MD_CTX_free>;
+using RSAPointer = DeleteFnPtr<RSA, RSA_free>;
+using ECPointer = DeleteFnPtr<EC_KEY, EC_KEY_free>;
+using BignumPointer = DeleteFnPtr<BIGNUM, BN_free>;
+using NetscapeSPKIPointer = DeleteFnPtr<NETSCAPE_SPKI, NETSCAPE_SPKI_free>;
+using ECGroupPointer = DeleteFnPtr<EC_GROUP, EC_GROUP_free>;
+using ECPointPointer = DeleteFnPtr<EC_POINT, EC_POINT_free>;
+using ECKeyPointer = DeleteFnPtr<EC_KEY, EC_KEY_free>;
+using DHPointer = DeleteFnPtr<DH, DH_free>;
+
+struct StackOfX509Deleter {
+  void operator()(STACK_OF(X509)* p) const { sk_X509_pop_free(p, X509_free); }
+};
+using StackOfX509 = std::unique_ptr<STACK_OF(X509), StackOfX509Deleter>;
+using ContextStatus = SecurityProvider::Context::ContextStatus;
+using TicketKeyCallbackResult = SecurityProvider::TicketKeyCallbackResult;
+using TicketKey = SecurityProvider::TicketKey;
 
 // Ensure that OpenSSL has enough entropy (at least 256 bits) for its PRNG.
 // The entropy pool starts out empty and needs to fill up before the PRNG
@@ -173,10 +234,10 @@ std::vector<std::string> SecurityProvider::GetCiphers() {
 }
 
 std::vector<std::string> SecurityProvider::GetTLSCiphers() {
-  crypto::SSLCtxPointer ctx(SSL_CTX_new(TLS_method()));
+  SSLCtxPointer ctx(SSL_CTX_new(TLS_method()));
   CHECK(ctx);
 
-  crypto::SSLPointer ssl(SSL_new(ctx.get()));
+  SSLPointer ssl(SSL_new(ctx.get()));
   CHECK(ssl);
 
   STACK_OF(SSL_CIPHER)* ciphers = SSL_get_ciphers(ssl.get());
@@ -215,12 +276,23 @@ uint32_t SecurityProvider::GetError() {
   return ERR_get_error();  // NOLINT(runtime/int)
 }
 
+std::string SecurityProvider::GetErrorStr() {
+  unsigned long err = ERR_get_error();  // NOLINT(runtime/int)
+  const char* str = ERR_reason_error_string(err);
+  return std::string(str);
+}
+
+std::string SecurityProvider::GetErrorStr(uint32_t id) {
+  const char* str = ERR_reason_error_string(id);
+  return std::string(str);
+}
+
 bool SecurityProvider::VerifySpkac(const char* data, unsigned int len) {
-  node::crypto::NetscapeSPKIPointer spki(NETSCAPE_SPKI_b64_decode(data, len));
+  NetscapeSPKIPointer spki(NETSCAPE_SPKI_b64_decode(data, len));
   if (!spki)
     return false;
 
-  node::crypto::EVPKeyPointer pkey(X509_PUBKEY_get(spki->spkac->pubkey));
+  EVPKeyPointer pkey(X509_PUBKEY_get(spki->spkac->pubkey));
   if (!pkey)
     return false;
 
@@ -232,15 +304,15 @@ char* SecurityProvider::ExportPublicKey(const char* data,
                                         size_t* size) {
   char* buf = nullptr;
 
-  node::crypto::BIOPointer bio(BIO_new(BIO_s_mem()));
+  BIOPointer bio(BIO_new(BIO_s_mem()));
   if (!bio)
     return nullptr;
 
-  node::crypto::NetscapeSPKIPointer spki(NETSCAPE_SPKI_b64_decode(data, len));
+  NetscapeSPKIPointer spki(NETSCAPE_SPKI_b64_decode(data, len));
   if (!spki)
     return nullptr;
 
-  node::crypto::EVPKeyPointer pkey(NETSCAPE_SPKI_get_pubkey(spki.get()));
+  EVPKeyPointer pkey(NETSCAPE_SPKI_get_pubkey(spki.get()));
   if (!pkey)
     return nullptr;
 
@@ -258,7 +330,7 @@ char* SecurityProvider::ExportPublicKey(const char* data,
 }
 
 unsigned char* SecurityProvider::ExportChallenge(const char* data, int len) {
-  node::crypto::NetscapeSPKIPointer sp(NETSCAPE_SPKI_b64_decode(data, len));
+  NetscapeSPKIPointer sp(NETSCAPE_SPKI_b64_decode(data, len));
   if (!sp)
     return nullptr;
 
@@ -326,13 +398,6 @@ bool SecurityProvider::TimingSafeEquals(const void* a,
   return CRYPTO_memcmp(a, b, len) == 0;
 }
 
-// Pop errors from OpenSSL's error stack that were added
-// between when this was constructed and destructed.
-struct MarkPopErrorOnReturn {
-  MarkPopErrorOnReturn() { ERR_set_mark(); }
-  ~MarkPopErrorOnReturn() { ERR_pop_to_mark(); }
-};
-
 enum ParsePublicKeyResult {
   kParsePublicOk,
   kParsePublicNotRecognized,
@@ -352,8 +417,8 @@ static int PasswordCallback(char* buf, int size, int rwflag, void* u) {
 }
 
 static ParsePublicKeyResult TryParsePublicKey(
-    crypto::EVPKeyPointer* pkey,
-    const crypto::BIOPointer& bp,
+    EVPKeyPointer* pkey,
+    const BIOPointer& bp,
     const char* name,
     // NOLINTNEXTLINE(runtime/int)
     std::function<EVP_PKEY*(const unsigned char** p, long l)> parse) {
@@ -376,10 +441,10 @@ static ParsePublicKeyResult TryParsePublicKey(
   return *pkey ? kParsePublicOk : kParsePublicFailed;
 }
 
-static ParsePublicKeyResult ParsePublicKey(crypto::EVPKeyPointer* pkey,
+static ParsePublicKeyResult ParsePublicKey(EVPKeyPointer* pkey,
                                            const char* key_pem,
                                            int key_pem_len) {
-  crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+  BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
                                         key_pem_len));
   if (!bp)
     return kParsePublicFailed;
@@ -407,7 +472,7 @@ static ParsePublicKeyResult ParsePublicKey(crypto::EVPKeyPointer* pkey,
   CHECK(BIO_reset(bp.get()));
   return TryParsePublicKey(pkey, bp, "CERTIFICATE",
       [](const unsigned char** p, long l) {  // NOLINT(runtime/int)
-        crypto::X509Pointer x509(d2i_X509(nullptr, p, l));
+        X509Pointer x509(d2i_X509(nullptr, p, l));
         return x509 ? X509_get_pubkey(x509.get()) : nullptr;
       });
 }
@@ -420,8 +485,8 @@ bool SecurityProvider::KeyCipher::PrivateEncrypt(const char* key_pem,
                                                  int len,
                                                  unsigned char** out,
                                                  size_t* out_len) {
-  crypto::EVPKeyPointer pkey;
-  crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+  EVPKeyPointer pkey;
+  BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
                                         key_pem_len));
   if (bp == nullptr)
     return false;
@@ -433,7 +498,7 @@ bool SecurityProvider::KeyCipher::PrivateEncrypt(const char* key_pem,
   if (pkey == nullptr)
     return false;
 
-  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
   if (!ctx)
     return false;
   if (EVP_PKEY_sign_init(ctx.get()) <= 0)
@@ -460,8 +525,8 @@ bool SecurityProvider::KeyCipher::PrivateDecrypt(const char* key_pem,
                              int len,
                              unsigned char** out,
                              size_t* out_len) {
-  crypto::EVPKeyPointer pkey;
-  crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+  EVPKeyPointer pkey;
+  BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
                                         key_pem_len));
   if (bp == nullptr)
     return false;
@@ -473,7 +538,7 @@ bool SecurityProvider::KeyCipher::PrivateDecrypt(const char* key_pem,
   if (pkey == nullptr)
     return false;
 
-  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
   if (!ctx)
     return false;
   if (EVP_PKEY_decrypt_init(ctx.get()) <= 0)
@@ -500,7 +565,7 @@ bool SecurityProvider::KeyCipher::PublicEncrypt(const char* key_pem,
                              int len,
                              unsigned char** out,
                              size_t* out_len) {
-  crypto::EVPKeyPointer pkey;
+  EVPKeyPointer pkey;
 
   // Check if this is a PKCS#8 or RSA public key before trying as X.509 and
   // private key.
@@ -510,7 +575,7 @@ bool SecurityProvider::KeyCipher::PublicEncrypt(const char* key_pem,
 
   if (pkey == nullptr) {
     // Private key fallback.
-    crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+    BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
                                           key_pem_len));
     if (bp == nullptr)
       return false;
@@ -522,7 +587,7 @@ bool SecurityProvider::KeyCipher::PublicEncrypt(const char* key_pem,
       return false;
   }
 
-  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
   if (!ctx)
     return false;
   if (EVP_PKEY_encrypt_init(ctx.get()) <= 0)
@@ -549,7 +614,7 @@ bool SecurityProvider::KeyCipher::PublicDecrypt(const char* key_pem,
                              int len,
                              unsigned char** out,
                              size_t* out_len) {
-  crypto::EVPKeyPointer pkey;
+  EVPKeyPointer pkey;
 
   // Check if this is a PKCS#8 or RSA public key before trying as X.509 and
   // private key.
@@ -559,7 +624,7 @@ bool SecurityProvider::KeyCipher::PublicDecrypt(const char* key_pem,
 
   if (pkey == nullptr) {
     // Private key fallback.
-    crypto::BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
+    BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem),
                                           key_pem_len));
     if (bp == nullptr)
       return false;
@@ -571,7 +636,7 @@ bool SecurityProvider::KeyCipher::PublicDecrypt(const char* key_pem,
       return false;
   }
 
-  crypto::EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
   if (!ctx)
     return false;
   if (EVP_PKEY_verify_recover_init(ctx.get()) <= 0)
@@ -593,8 +658,8 @@ bool SecurityProvider::KeyCipher::PublicDecrypt(const char* key_pem,
 
 class KeyPairGenerationConfig {
  public:
-  virtual crypto::EVPKeyCtxPointer Setup() = 0;
-  virtual bool Configure(const crypto::EVPKeyCtxPointer& ctx) {
+  virtual EVPKeyCtxPointer Setup() = 0;
+  virtual bool Configure(const EVPKeyCtxPointer& ctx) {
     return true;
   }
   virtual ~KeyPairGenerationConfig() {}
@@ -605,17 +670,17 @@ class RSAKeyPairGenerationConfig : public KeyPairGenerationConfig {
   RSAKeyPairGenerationConfig(unsigned int modulus_bits, unsigned int exponent)
     : modulus_bits_(modulus_bits), exponent_(exponent) {}
 
-  crypto::EVPKeyCtxPointer Setup() override {
-    return crypto::EVPKeyCtxPointer(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr));
+  EVPKeyCtxPointer Setup() override {
+    return EVPKeyCtxPointer(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr));
   }
 
-  bool Configure(const crypto::EVPKeyCtxPointer& ctx) override {
+  bool Configure(const EVPKeyCtxPointer& ctx) override {
     if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), modulus_bits_) <= 0)
       return false;
 
     // 0x10001 is the default RSA exponent.
     if (exponent_ != 0x10001) {
-      crypto::BignumPointer bn(BN_new());
+      BignumPointer bn(BN_new());
       CHECK_NOT_NULL(bn.get());
       CHECK(BN_set_word(bn.get(), exponent_));
       if (EVP_PKEY_CTX_set_rsa_keygen_pubexp(ctx.get(), bn.get()) <= 0)
@@ -635,8 +700,8 @@ class DSAKeyPairGenerationConfig : public KeyPairGenerationConfig {
   DSAKeyPairGenerationConfig(unsigned int modulus_bits, int divisor_bits)
     : modulus_bits_(modulus_bits), divisor_bits_(divisor_bits) {}
 
-    crypto::EVPKeyCtxPointer Setup() override {
-      crypto::EVPKeyCtxPointer param_ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_DSA,
+    EVPKeyCtxPointer Setup() override {
+      EVPKeyCtxPointer param_ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_DSA,
                                                              nullptr));
     if (!param_ctx)
       return nullptr;
@@ -660,7 +725,7 @@ class DSAKeyPairGenerationConfig : public KeyPairGenerationConfig {
       return nullptr;
     param_ctx.reset();
 
-    crypto::EVPKeyCtxPointer key_ctx(EVP_PKEY_CTX_new(params, nullptr));
+    EVPKeyCtxPointer key_ctx(EVP_PKEY_CTX_new(params, nullptr));
     EVP_PKEY_free(params);
     return key_ctx;
   }
@@ -675,8 +740,8 @@ class ECKeyPairGenerationConfig : public KeyPairGenerationConfig {
   ECKeyPairGenerationConfig(int curve_nid, int param_encoding)
     : curve_nid_(curve_nid), param_encoding_(param_encoding) {}
 
-  crypto::EVPKeyCtxPointer Setup() override {
-    crypto::EVPKeyCtxPointer param_ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC,
+  EVPKeyCtxPointer Setup() override {
+    EVPKeyCtxPointer param_ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC,
                                                            nullptr));
     if (!param_ctx)
       return nullptr;
@@ -696,7 +761,7 @@ class ECKeyPairGenerationConfig : public KeyPairGenerationConfig {
       return nullptr;
     param_ctx.reset();
 
-    crypto::EVPKeyCtxPointer key_ctx(EVP_PKEY_CTX_new(params, nullptr));
+    EVPKeyCtxPointer key_ctx(EVP_PKEY_CTX_new(params, nullptr));
     EVP_PKEY_free(params);
     return key_ctx;
   }
@@ -736,7 +801,7 @@ bool Generate(KeyPairGenerationConfig* config, void** out) {
   SecurityProvider::CheckEntropy();
 
   // Create the key generation context.
-  crypto::EVPKeyCtxPointer ctx = config->Setup();
+  EVPKeyCtxPointer ctx = config->Setup();
   if (!ctx)
     return false;
 
@@ -791,14 +856,14 @@ bool SecurityProvider::KeyPairGenerator::EncodeKeys(Key* public_key,
                                                     Key* private_key) const {
   //  EVP_PKEY* pkey = pkey_.get();
   EVP_PKEY* pkey = static_cast<EVP_PKEY*>(pkey_);
-  crypto::BIOPointer bio(BIO_new(BIO_s_mem()));
+  BIOPointer bio(BIO_new(BIO_s_mem()));
   CHECK(bio);
 
   // Encode the public key.
   if (pub_encoding_ == security::PK_ENCODING_PKCS1) {
     // PKCS#1 is only valid for RSA keys.
     CHECK_EQ(EVP_PKEY_id(pkey), EVP_PKEY_RSA);
-    crypto::RSAPointer rsa(EVP_PKEY_get1_RSA(pkey));
+    RSAPointer rsa(EVP_PKEY_get1_RSA(pkey));
     if (pub_format_ == security::PK_FORMAT_PEM) {
       // Encode PKCS#1 as PEM.
       if (PEM_write_bio_RSAPublicKey(bio.get(), rsa.get()) != 1)
@@ -837,7 +902,7 @@ bool SecurityProvider::KeyPairGenerator::EncodeKeys(Key* public_key,
     // PKCS#1 is only permitted for RSA keys.
     CHECK_EQ(EVP_PKEY_id(pkey), EVP_PKEY_RSA);
 
-    crypto::RSAPointer rsa(EVP_PKEY_get1_RSA(pkey));
+    RSAPointer rsa(EVP_PKEY_get1_RSA(pkey));
     if (pri_format_ == security::PK_FORMAT_PEM) {
       // Encode PKCS#1 as PEM.
       char* pass = const_cast<char*>(passphrase_.c_str());
@@ -882,7 +947,7 @@ bool SecurityProvider::KeyPairGenerator::EncodeKeys(Key* public_key,
     // SEC1 is only permitted for EC keys.
     CHECK_EQ(EVP_PKEY_id(pkey), EVP_PKEY_EC);
 
-    crypto::ECKeyPointer ec_key(EVP_PKEY_get1_EC_KEY(pkey));
+    ECKeyPointer ec_key(EVP_PKEY_get1_EC_KEY(pkey));
     if (pri_format_ == security::PK_FORMAT_PEM) {
       // Encode SEC1 as PEM.
       const char* pass = passphrase_.c_str();
@@ -920,6 +985,964 @@ bool SecurityProvider::SetFipsSupport(bool enable) {
   return enabled == enable ? true : FIPS_mode_set(enable);
 }
 #endif /* NODE_FIPS_MODE */
+
+static X509_STORE* root_cert_store;
+
+class SecurityProvider::Context::ContextImpl {
+ public:
+  ContextImpl() {}
+  ~ContextImpl() {}
+  ContextStatus Init(int min_version, int max_version,
+                     std::string method_name);
+  void AddRootCerts();
+  ContextStatus SetCert(Cert* cert, Environment* env);
+  ContextStatus SetKey(Key* key_data,
+                       std::string passphrase,
+                       bool has_passphrase,
+                       Environment* env);
+  ContextStatus AddCACert(Cert* cert, Environment* env);
+  ContextStatus SetCiphers(std::string ciphers);
+  ContextStatus AddCRL(Data* crl_data, Environment* env);
+  ContextStatus SetECDHCurve(std::string curve);
+  ContextStatus SetDHParam(Data* dh_data, Environment* env);
+  ContextStatus SetOptions(int64_t val);
+  ContextStatus SetSessionContextId(const unsigned char* id,
+                                    unsigned int length);
+  ContextStatus SetSessionTimeout(uint32_t timeout);
+  ContextStatus LoadPKCS12(Data* s, std::vector<char> pass, Environment* env);
+  ContextStatus SetClientCertEngine(std::string engine_id);
+  ContextStatus GetCertificate(Cert* cert);
+  ContextStatus GetIssuerCertificate(Cert* cert);
+  ContextStatus SetTicketKey(TicketKey* key);
+  TicketKey* GetTicketKey();
+  ContextStatus EnableTicketCallback(OnTicketKeyCallback callback);
+  ContextStatus SetEngine(std::string name, uint32_t flags);
+  static int TicketKeyCallback(SSL* ssl,
+                        unsigned char* name,
+                        unsigned char* iv,
+                        EVP_CIPHER_CTX* ectx,
+                        HMAC_CTX* hctx,
+                        int enc);
+  static int TicketCompatibilityCallback(SSL* ssl,
+                                         unsigned char* name,
+                                         unsigned char* iv,
+                                         EVP_CIPHER_CTX* ectx,
+                                         HMAC_CTX* hctx,
+                                         int enc);
+
+ private:
+  SSLCtxPointer ctx_;
+  X509Pointer cert_;
+  X509Pointer issuer_;
+  TicketKey ticket_key_;
+  OnTicketKeyCallback on_ticketkey_callback_;
+};
+
+SecurityProvider::Context::Context(Environment* env)
+  : context_impl_(std::make_unique<ContextImpl>()), env_(env) {}
+
+SecurityProvider::Context::~Context() {
+}
+
+int SecurityProvider::Context::ContextImpl::TicketCompatibilityCallback(
+    SSL* ssl, unsigned char* name, unsigned char* iv, EVP_CIPHER_CTX* ectx,
+    HMAC_CTX* hctx, int enc) {
+  Context* context = static_cast<Context*>(
+      SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl)));
+  ContextImpl* ctx = context->context_impl_.get();
+
+  if (enc) {
+    memcpy(name,
+           ctx->ticket_key_.ticket_key_name_,
+           sizeof(ctx->ticket_key_.ticket_key_name_));
+    if (RAND_bytes(iv, 16) <= 0 ||
+        EVP_EncryptInit_ex(ectx, EVP_aes_128_cbc(), nullptr,
+                           ctx->ticket_key_.ticket_key_aes_, iv) <= 0 ||
+        HMAC_Init_ex(hctx,
+                     ctx->ticket_key_.ticket_key_hmac_,
+                     sizeof(ctx->ticket_key_.ticket_key_hmac_),
+                     EVP_sha256(), nullptr) <= 0) {
+      return -1;
+    }
+    return 1;
+  }
+
+  if (memcmp(name,
+             ctx->ticket_key_.ticket_key_name_,
+             sizeof(ctx->ticket_key_.ticket_key_name_)) != 0) {
+    // The ticket key name does not match. Discard the ticket.
+    return 0;
+  }
+
+  if (EVP_DecryptInit_ex(ectx,
+                         EVP_aes_128_cbc(),
+                         nullptr, ctx->ticket_key_.ticket_key_aes_,
+                         iv) <= 0 ||
+      HMAC_Init_ex(hctx,
+                   ctx->ticket_key_.ticket_key_hmac_,
+                   sizeof(ctx->ticket_key_.ticket_key_hmac_),
+                   EVP_sha256(), nullptr) <= 0) {
+    return -1;
+  }
+  return 1;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::Init(int min_version,
+    int max_version, std::string method_name) {
+  const SSL_METHOD* method = TLS_method();
+  if (!method_name.empty()) {
+    const char* ssl_method = method_name.c_str();
+    // Note that SSLv2 and SSLv3 are disallowed but SSLv23_method and friends
+    // are still accepted.  They are OpenSSL's way of saying that all known
+    // protocols are supported unless explicitly disabled (which we do below
+    // for SSLv2 and SSLv3.)
+    if (strcmp(ssl_method, "SSLv2_method") == 0) {
+      return ContextStatus::MethodDisabled;
+    } else if (strcmp(ssl_method, "SSLv2_server_method") == 0) {
+      return ContextStatus::MethodDisabled;
+    } else if (strcmp(ssl_method, "SSLv2_client_method") == 0) {
+      return ContextStatus::MethodDisabled;
+    } else if (strcmp(ssl_method, "SSLv3_method") == 0) {
+      return ContextStatus::MethodDisabled;
+    } else if (strcmp(ssl_method, "SSLv3_server_method") == 0) {
+      return ContextStatus::MethodDisabled;
+    } else if (strcmp(ssl_method, "SSLv3_client_method") == 0) {
+      return ContextStatus::MethodDisabled;
+    } else if (strcmp(ssl_method, "SSLv23_method") == 0) {
+      // noop
+    } else if (strcmp(ssl_method, "SSLv23_server_method") == 0) {
+      method = TLS_server_method();
+    } else if (strcmp(ssl_method, "SSLv23_client_method") == 0) {
+      method = TLS_client_method();
+    } else if (strcmp(ssl_method, "TLS_method") == 0) {
+      min_version = 0;
+      max_version = 0;
+    } else if (strcmp(ssl_method, "TLS_server_method") == 0) {
+      min_version = 0;
+      max_version = 0;
+      method = TLS_server_method();
+    } else if (strcmp(ssl_method, "TLS_client_method") == 0) {
+      min_version = 0;
+      max_version = 0;
+      method = TLS_client_method();
+    } else if (strcmp(ssl_method, "TLSv1_method") == 0) {
+      min_version = TLS1_VERSION;
+      max_version = TLS1_VERSION;
+    } else if (strcmp(ssl_method, "TLSv1_server_method") == 0) {
+      min_version = TLS1_VERSION;
+      max_version = TLS1_VERSION;
+      method = TLS_server_method();
+    } else if (strcmp(ssl_method, "TLSv1_client_method") == 0) {
+      min_version = TLS1_VERSION;
+      max_version = TLS1_VERSION;
+      method = TLS_client_method();
+    } else if (strcmp(ssl_method, "TLSv1_1_method") == 0) {
+      min_version = TLS1_1_VERSION;
+      max_version = TLS1_1_VERSION;
+    } else if (strcmp(ssl_method, "TLSv1_1_server_method") == 0) {
+      min_version = TLS1_1_VERSION;
+      max_version = TLS1_1_VERSION;
+      method = TLS_server_method();
+    } else if (strcmp(ssl_method, "TLSv1_1_client_method") == 0) {
+      min_version = TLS1_1_VERSION;
+      max_version = TLS1_1_VERSION;
+      method = TLS_client_method();
+    } else if (strcmp(ssl_method, "TLSv1_2_method") == 0) {
+      min_version = TLS1_2_VERSION;
+      max_version = TLS1_2_VERSION;
+    } else if (strcmp(ssl_method, "TLSv1_2_server_method") == 0) {
+      min_version = TLS1_2_VERSION;
+      max_version = TLS1_2_VERSION;
+      method = TLS_server_method();
+    } else if (strcmp(ssl_method, "TLSv1_2_client_method") == 0) {
+      min_version = TLS1_2_VERSION;
+      max_version = TLS1_2_VERSION;
+      method = TLS_client_method();
+    } else {
+      return ContextStatus::UnknownMethod;
+    }
+  }
+  ctx_.reset(SSL_CTX_new(method));
+
+  SSL_CTX_set_app_data(ctx_.get(), this);
+
+  // Disable SSLv2 in the case when method == TLS_method() and the
+  // cipher list contains SSLv2 ciphers (not the default, should be rare.)
+  // The bundled OpenSSL doesn't have SSLv2 support but the system OpenSSL may.
+  // SSLv3 is disabled because it's susceptible to downgrade attacks (POODLE.)
+  SSL_CTX_set_options(ctx_.get(), SSL_OP_NO_SSLv2);
+  SSL_CTX_set_options(ctx_.get(), SSL_OP_NO_SSLv3);
+
+  // Enable automatic cert chaining. This is enabled by default in OpenSSL, but
+  // disabled by default in BoringSSL. Enable it explicitly to make the
+  // behavior match when Node is built with BoringSSL.
+  SSL_CTX_clear_mode(ctx_.get(), SSL_MODE_NO_AUTO_CHAIN);
+
+  // SSL session cache configuration
+  SSL_CTX_set_session_cache_mode(ctx_.get(),
+                                 SSL_SESS_CACHE_SERVER |
+                                 SSL_SESS_CACHE_NO_INTERNAL |
+                                 SSL_SESS_CACHE_NO_AUTO_CLEAR);
+
+  SSL_CTX_set_min_proto_version(ctx_.get(), min_version);
+  SSL_CTX_set_max_proto_version(ctx_.get(), max_version);
+
+  // OpenSSL 1.1.0 changed the ticket key size, but the OpenSSL 1.0.x size was
+  // exposed in the public API. To retain compatibility, install a callback
+  // which restores the old algorithm.
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+  if (RAND_bytes(ticket_key_.ticket_key_name_,
+                 sizeof(ticket_key_.ticket_key_name_)) <= 0 ||
+      RAND_bytes(ticket_key_.ticket_key_hmac_,
+                 sizeof(ticket_key_.ticket_key_hmac_)) <= 0 ||
+      RAND_bytes(ticket_key_.ticket_key_aes_,
+                 sizeof(ticket_key_.ticket_key_aes_)) <= 0) {
+    return ContextStatus::TicketKeyError;
+  }
+  SSL_CTX_set_tlsext_ticket_key_cb(ctx_.get(), TicketCompatibilityCallback);
+#endif
+
+  return ContextStatus::Ok;
+}
+
+static const char* const root_certs[] = {
+#include "node_root_certs.h"  // NOLINT(build/include_order)
+};
+
+static const char system_cert_path[] = NODE_OPENSSL_SYSTEM_CERT_PATH;
+
+//
+// This callback is used to avoid the default passphrase callback in OpenSSL
+// which will typically prompt for the passphrase. The prompting is designed
+// for the OpenSSL CLI, but works poorly for Node.js because it involves
+// synchronous interaction with the controlling terminal, something we never
+// want, and use this function to avoid it.
+static int NoPasswordCallback(char* buf, int size, int rwflag, void* u) {
+  return 0;
+}
+
+static X509_STORE* NewRootCertStore() {
+  static std::vector<X509*> root_certs_vector;
+  static Mutex root_certs_vector_mutex;
+  Mutex::ScopedLock lock(root_certs_vector_mutex);
+
+  if (root_certs_vector.empty()) {
+    for (size_t i = 0; i < arraysize(root_certs); i++) {
+      X509* x509 =
+          PEM_read_bio_X509(crypto::NodeBIO::NewFixed(root_certs[i],
+                                              strlen(root_certs[i])).get(),
+                            nullptr,   // no re-use of X509 structure
+                            NoPasswordCallback,
+                            nullptr);  // no callback data
+
+      // Parse errors from the built-in roots are fatal.
+      CHECK_NOT_NULL(x509);
+
+      root_certs_vector.push_back(x509);
+    }
+  }
+
+  X509_STORE* store = X509_STORE_new();
+  if (*system_cert_path != '\0') {
+    X509_STORE_load_locations(store, system_cert_path, nullptr);
+  }
+  if (per_process_opts->ssl_openssl_cert_store) {
+    X509_STORE_set_default_paths(store);
+  } else {
+    for (X509* cert : root_certs_vector) {
+      X509_up_ref(cert);
+      X509_STORE_add_cert(store, cert);
+    }
+  }
+
+  return store;
+}
+
+int SSL_CTX_get_issuer(SSL_CTX* ctx, X509* cert, X509** issuer) {
+  X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+  DeleteFnPtr<X509_STORE_CTX, X509_STORE_CTX_free> store_ctx(
+      X509_STORE_CTX_new());
+  return store_ctx.get() != nullptr &&
+         X509_STORE_CTX_init(store_ctx.get(), store, nullptr, nullptr) == 1 &&
+         X509_STORE_CTX_get1_issuer(issuer, store_ctx.get(), cert) == 1;
+}
+
+int SSL_CTX_use_certificate_chain(SSL_CTX* ctx,
+                                  X509Pointer&& x,
+                                  STACK_OF(X509)* extra_certs,
+                                  X509Pointer* cert,
+                                  X509Pointer* issuer_) {
+  CHECK(!*issuer_);
+  CHECK(!*cert);
+  X509* issuer = nullptr;
+
+  int ret = SSL_CTX_use_certificate(ctx, x.get());
+
+  if (ret) {
+    // If we could set up our certificate, now proceed to
+    // the CA certificates.
+    SSL_CTX_clear_extra_chain_certs(ctx);
+
+    for (int i = 0; i < sk_X509_num(extra_certs); i++) {
+      X509* ca = sk_X509_value(extra_certs, i);
+
+      // NOTE: Increments reference count on `ca`
+      if (!SSL_CTX_add1_chain_cert(ctx, ca)) {
+        ret = 0;
+        issuer = nullptr;
+        break;
+      }
+      // Note that we must not free r if it was successfully
+      // added to the chain (while we must free the main
+      // certificate, since its reference count is increased
+      // by SSL_CTX_use_certificate).
+
+      // Find issuer
+      if (issuer != nullptr || X509_check_issued(ca, x.get()) != X509_V_OK)
+        continue;
+
+      issuer = ca;
+    }
+  }
+
+  // Try getting issuer from a cert store
+  if (ret) {
+    if (issuer == nullptr) {
+      ret = SSL_CTX_get_issuer(ctx, x.get(), &issuer);
+      ret = ret < 0 ? 0 : 1;
+      // NOTE: get_cert_store doesn't increment reference count,
+      // no need to free `store`
+    } else {
+      // Increment issuer reference count
+      issuer = X509_dup(issuer);
+      if (issuer == nullptr) {
+        ret = 0;
+      }
+    }
+  }
+
+  issuer_->reset(issuer);
+
+  if (ret && x != nullptr) {
+    cert->reset(X509_dup(x.get()));
+    if (!*cert)
+      ret = 0;
+  }
+  return ret;
+}
+
+int SSL_CTX_use_certificate_chain(SSL_CTX* ctx,
+                                  BIOPointer&& in,
+                                  X509Pointer* cert,
+                                  X509Pointer* issuer) {
+  // Just to ensure that `ERR_peek_last_error` below will return only errors
+  // that we are interested in
+  ERR_clear_error();
+
+  X509Pointer x(
+      PEM_read_bio_X509_AUX(in.get(), nullptr, NoPasswordCallback, nullptr));
+
+  if (!x)
+    return 0;
+
+  unsigned long err = 0;  // NOLINT(runtime/int)
+
+  StackOfX509 extra_certs(sk_X509_new_null());
+  if (!extra_certs)
+    return 0;
+
+  while (X509Pointer extra {PEM_read_bio_X509(in.get(),
+                                    nullptr,
+                                    NoPasswordCallback,
+                                    nullptr)}) {
+    if (sk_X509_push(extra_certs.get(), extra.get())) {
+      extra.release();
+      continue;
+    }
+
+    return 0;
+  }
+
+  // When the while loop ends, it's usually just EOF.
+  err = ERR_peek_last_error();
+  if (ERR_GET_LIB(err) == ERR_LIB_PEM &&
+      ERR_GET_REASON(err) == PEM_R_NO_START_LINE) {
+    ERR_clear_error();
+  } else {
+    // some real error
+    return 0;
+  }
+
+  return SSL_CTX_use_certificate_chain(ctx,
+                                       std::move(x),
+                                       extra_certs.get(),
+                                       cert,
+                                       issuer);
+}
+
+
+void SecurityProvider::Context::ContextImpl::AddRootCerts() {
+  if (root_cert_store == nullptr) {
+    root_cert_store = NewRootCertStore();
+  }
+
+  X509_STORE_up_ref(root_cert_store);
+  SSL_CTX_set_cert_store(ctx_.get(), root_cert_store);
+}
+
+ContextStatus SecurityProvider::Context::Init(int min_version,
+                                              int max_version,
+                                              std::string method_name) {
+  return context_impl_->Init(min_version, max_version, method_name);
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetCert(Cert* cert,
+    Environment* env) {
+  BIOPointer bio(crypto::NodeBIO::NewFixed(cert->data_,
+                                                   cert->length_,
+                                                   env));
+  if (!bio)
+    return ContextStatus::CertSourceError;
+
+  cert_.reset();
+  issuer_.reset();
+
+  int rv = SSL_CTX_use_certificate_chain(ctx_.get(),
+                                         std::move(bio),
+                                         &cert_,
+                                         &issuer_);
+
+  if (!rv) {
+    return ContextStatus::CertError;
+  }
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetKey(Key* key_data,
+    std::string passphrase, bool has_passphrase, Environment* env) {
+  ClearErrorOnReturn clear_error_on_return;
+  BIOPointer bio(crypto::NodeBIO::NewFixed(key_data->data_,
+                                                   key_data->length_,
+                                                   env));
+  if (!bio)
+    return ContextStatus::PrivateKeySourceError;
+
+    void* ps = has_passphrase ?
+      static_cast<void*>(const_cast<char*>(passphrase.c_str())) : nullptr;
+    EVPKeyPointer key(
+      PEM_read_bio_PrivateKey(bio.get(),
+                              nullptr,
+                              PasswordCallback,
+                              ps));
+
+  if (!key) {
+    return ContextStatus::PrivateKeyReadError;
+    /*
+    unsigned long err = ERR_get_error();  // NOLINT(runtime/int)
+    if (!err) {
+      return env->ThrowError("PEM_read_bio_PrivateKey");
+    }
+    return ThrowCryptoError(env, err);
+    */
+  }
+
+  int rv = SSL_CTX_use_PrivateKey(ctx_.get(), key.get());
+
+  if (!rv) {
+    return ContextStatus::PrivateKeyUsageError;
+    /*
+    unsigned long err = ERR_get_error();  // NOLINT(runtime/int)
+    if (!err)
+      return env->ThrowError("SSL_CTX_use_PrivateKey");
+    return ThrowCryptoError(env, err);
+    */
+  }
+
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetCiphers(
+    std::string ciphers) {
+  ClearErrorOnReturn clear_error_on_return;
+
+  if (!SSL_CTX_set_cipher_list(ctx_.get(), ciphers.c_str())) {
+    return ContextStatus::SetCiphersError;
+    /*
+    unsigned long err = ERR_get_error();  // NOLINT(runtime/int)
+    if (!err) {
+      return env->ThrowError("Failed to set ciphers");
+    }
+    return ThrowCryptoError(env, err);
+    */
+  }
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::AddCACert(Cert* cert_data,
+    Environment* env) {
+  ClearErrorOnReturn clear_error_on_return;
+
+  BIOPointer bio(crypto::NodeBIO::NewFixed(cert_data->data_,
+                                                   cert_data->length_,
+                                                   env));
+  if (!bio)
+    return ContextStatus::CACertSourceError;
+
+  X509_STORE* cert_store = SSL_CTX_get_cert_store(ctx_.get());
+  while (X509* x509 = PEM_read_bio_X509(
+      bio.get(), nullptr, NoPasswordCallback, nullptr)) {
+    if (cert_store == root_cert_store) {
+      cert_store = NewRootCertStore();
+      SSL_CTX_set_cert_store(ctx_.get(), cert_store);
+    }
+    X509_STORE_add_cert(cert_store, x509);
+    SSL_CTX_add_client_CA(ctx_.get(), x509);
+    X509_free(x509);
+  }
+
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::AddCRL(Data* crl_data,
+    Environment* env) {
+  ClearErrorOnReturn clear_error_on_return;
+  BIOPointer bio(crypto::NodeBIO::NewFixed(crl_data->data_,
+                                                   crl_data->length_,
+                                                   env));
+  if (!bio)
+    return ContextStatus::CRLSourceError;
+
+  DeleteFnPtr<X509_CRL, X509_CRL_free> crl(
+      PEM_read_bio_X509_CRL(bio.get(), nullptr, NoPasswordCallback, nullptr));
+
+  if (!crl)
+    return ContextStatus::CRLParseError;
+
+  X509_STORE* cert_store = SSL_CTX_get_cert_store(ctx_.get());
+  if (cert_store == root_cert_store) {
+    cert_store = NewRootCertStore();
+    SSL_CTX_set_cert_store(ctx_.get(), cert_store);
+  }
+
+  X509_STORE_add_crl(cert_store, crl.get());
+  X509_STORE_set_flags(cert_store,
+                       X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL);
+
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetECDHCurve(
+    std::string curve) {
+
+  if (!SSL_CTX_set1_curves_list(ctx_.get(), curve.c_str()))
+    return ContextStatus::ECDHSetError;
+    //  return env->ThrowError("Failed to set ECDH curve");
+
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetDHParam(
+    Data* dh_data, Environment* env) {
+  ClearErrorOnReturn clear_error_on_return;
+  DHPointer dh;
+  {
+    BIOPointer bio(crypto::NodeBIO::NewFixed(dh_data->data_,
+                                                    dh_data->length_,
+                                                    env));
+    if (!bio)
+      return ContextStatus::DHSourceError;
+
+    dh.reset(PEM_read_bio_DHparams(bio.get(), nullptr, nullptr, nullptr));
+  }
+
+  // Invalid dhparam is silently discarded and DHE is no longer used.
+  if (!dh)
+    return ContextStatus::Ok;
+
+  const BIGNUM* p;
+  DH_get0_pqg(dh.get(), &p, nullptr, nullptr);
+  const int size = BN_num_bits(p);
+  if (size < 1024) {
+    return ContextStatus::DH_PARAM_INVALID_LESS_THAN_1024;
+    /*
+    return THROW_ERR_INVALID_ARG_VALUE(
+        env, "DH parameter is less than 1024 bits");
+        */
+  } else if (size < 2048) {
+    return ContextStatus::DH_PARAM_INVALID_LESS_THAN_2048;
+    /*
+    args.GetReturnValue().Set(FIXED_ONE_BYTE_STRING(
+        env->isolate(), "DH parameter is less than 2048 bits"));
+        */
+  }
+
+  SSL_CTX_set_options(ctx_.get(), SSL_OP_SINGLE_DH_USE);
+  int r = SSL_CTX_set_tmp_dh(ctx_.get(), dh.get());
+
+  if (!r)
+    return ContextStatus::DH_PARAM_SET_ERROR;
+    //  return env->ThrowTypeError("Error setting temp DH parameter");
+
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetOptions(int64_t val) {
+  SSL_CTX_set_options(ctx_.get(),
+                      static_cast<long>(val));  // NOLINT(runtime/int)
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetSessionContextId(
+    const unsigned char* id, unsigned int length) {
+  int r = SSL_CTX_set_session_id_context(ctx_.get(), id, length);
+  if (r != 1)
+    return ContextStatus::SESSION_CONTEXT_ID_SET_ERROR;
+
+  return ContextStatus::Ok;
+  /*
+  BUF_MEM* mem;
+  Local<String> message;
+
+  BIOPointer bio(BIO_new(BIO_s_mem()));
+  if (!bio) {
+    message = FIXED_ONE_BYTE_STRING(args.GetIsolate(),
+                                    "SSL_CTX_set_session_id_context error");
+  } else {
+    ERR_print_errors(bio.get());
+    BIO_get_mem_ptr(bio.get(), &mem);
+    message = OneByteString(args.GetIsolate(), mem->data, mem->length);
+  }
+
+  args.GetIsolate()->ThrowException(Exception::TypeError(message));
+
+  return ContextStatus::Ok;
+  */
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetSessionTimeout(
+    uint32_t timeout) {
+  SSL_CTX_set_timeout(ctx_.get(), timeout);
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::LoadPKCS12(
+    Data* s, std::vector<char> pass, Environment* env) {
+  bool ret = false;
+  ClearErrorOnReturn clear_error_on_return;
+  BIOPointer in(crypto::NodeBIO::NewFixed(s->data_,
+                                                   s->length_,
+                                                   env));
+  if (!in) {
+    return ContextStatus::PKCS12_SOURCE_ERROR;
+    //  return env->ThrowError("Unable to load BIO");
+  }
+
+  issuer_.reset();
+  cert_.reset();
+
+  X509_STORE* cert_store = SSL_CTX_get_cert_store(ctx_.get());
+
+  DeleteFnPtr<PKCS12, PKCS12_free> p12;
+  EVPKeyPointer pkey;
+  X509Pointer cert;
+  StackOfX509 extra_certs;
+
+  PKCS12* p12_ptr = nullptr;
+  EVP_PKEY* pkey_ptr = nullptr;
+  X509* cert_ptr = nullptr;
+  STACK_OF(X509)* extra_certs_ptr = nullptr;
+  if (d2i_PKCS12_bio(in.get(), &p12_ptr) &&
+      (p12.reset(p12_ptr), true) &&  // Move ownership to the smart pointer.
+      PKCS12_parse(p12.get(), pass.data(),
+                   &pkey_ptr,
+                   &cert_ptr,
+                   &extra_certs_ptr) &&
+      (pkey.reset(pkey_ptr), cert.reset(cert_ptr),
+       extra_certs.reset(extra_certs_ptr), true) &&  // Move ownership.
+      SSL_CTX_use_certificate_chain(ctx_.get(),
+                                    std::move(cert),
+                                    extra_certs.get(),
+                                    &cert_,
+                                    &issuer_) &&
+      SSL_CTX_use_PrivateKey(ctx_.get(), pkey.get())) {
+    // Add CA certs too
+    for (int i = 0; i < sk_X509_num(extra_certs.get()); i++) {
+      X509* ca = sk_X509_value(extra_certs.get(), i);
+
+      if (cert_store == root_cert_store) {
+        cert_store = NewRootCertStore();
+        SSL_CTX_set_cert_store(ctx_.get(), cert_store);
+      }
+      X509_STORE_add_cert(cert_store, ca);
+      SSL_CTX_add_client_CA(ctx_.get(), ca);
+    }
+    ret = true;
+  }
+
+  if (!ret) {
+    return ContextStatus::PKCS12_LOAD_ERROR;
+    /*
+    unsigned long err = ERR_get_error();  // NOLINT(runtime/int)
+    const char* str = ERR_reason_error_string(err);
+    return env->ThrowError(str);
+    */
+  }
+
+  return ContextStatus::Ok;
+}
+//
+// Loads OpenSSL engine by engine id and returns it. The loaded engine
+// gets a reference so remember the corresponding call to ENGINE_free.
+#ifndef OPENSSL_NO_ENGINE
+static ENGINE* LoadEngineById(const char* engine_id) {
+  MarkPopErrorOnReturn mark_pop_error_on_return;
+
+  ENGINE* engine = ENGINE_by_id(engine_id);
+
+  if (engine == nullptr) {
+    // Engine not found, try loading dynamically.
+    engine = ENGINE_by_id("dynamic");
+    if (engine != nullptr) {
+      if (!ENGINE_ctrl_cmd_string(engine, "SO_PATH", engine_id, 0) ||
+          !ENGINE_ctrl_cmd_string(engine, "LOAD", nullptr, 0)) {
+        ENGINE_free(engine);
+        engine = nullptr;
+      }
+    }
+  }
+
+  /*
+  if (engine == nullptr) {
+    int err = ERR_get_error();
+    if (err != 0) {
+      ERR_error_string_n(err, *errmsg, sizeof(*errmsg));
+    } else {
+      snprintf(*errmsg, sizeof(*errmsg),
+               "Engine \"%s\" was not found", engine_id);
+    }
+  }
+  */
+
+  return engine;
+}
+
+// Helper for the smart pointer.
+void ENGINE_free_fn(ENGINE* engine) { ENGINE_free(engine); }
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetClientCertEngine(
+    std::string engine_id) {
+  MarkPopErrorOnReturn mark_pop_error_on_return;
+
+  DeleteFnPtr<ENGINE, ENGINE_free_fn> engine(
+      LoadEngineById(engine_id.c_str()));
+
+  if (!engine)
+    return ContextStatus::CLIENT_ENGINE_LOAD_ERROR;
+    //  return env->ThrowError(errmsg);
+
+  // Note that this takes another reference to `engine`.
+  int r = SSL_CTX_set_client_cert_engine(ctx_.get(), engine.get());
+  if (r == 0)
+    return ContextStatus::CLIENT_ENGINE_SET_ERROR;
+    //  return ThrowCryptoError(env, ERR_get_error());
+
+  return ContextStatus::Ok;
+}
+#endif  // !OPENSSL_NO_ENGINE
+
+inline void* BufferMalloc(size_t length) {
+  return per_process_opts->zero_fill_all_buffers ?
+      node::UncheckedCalloc(length) :
+      node::UncheckedMalloc(length);
+}
+
+ContextStatus Copy(X509* cert, SecurityProvider::Cert* out) {
+  // i2d means convert from internal OpenSSL c struct to der format.
+  int size = i2d_X509(cert, nullptr);
+  void* data = BufferMalloc(size);
+  if (data == nullptr) {
+    return ContextStatus::MALLOC_ERROR;
+  }
+
+  unsigned char* serialized = reinterpret_cast<unsigned char*>(data);
+  i2d_X509(cert, &serialized);
+  out->data_ = reinterpret_cast<const char*>(serialized);
+  out->length_ = size;
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::GetCertificate(
+    SecurityProvider::Cert* out) {
+  return Copy(cert_.get(), out);
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::GetIssuerCertificate(
+    Cert* out) {
+  return Copy(issuer_.get(), out);
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetTicketKey(
+    TicketKey* key) {
+
+  return ContextStatus::Ok;
+}
+
+TicketKey* SecurityProvider::Context::ContextImpl::GetTicketKey() {
+  return &ticket_key_;
+}
+
+int SecurityProvider::Context::ContextImpl::TicketKeyCallback(SSL* ssl,
+                      unsigned char* name,
+                      unsigned char* iv,
+                      EVP_CIPHER_CTX* ectx,
+                      HMAC_CTX* hctx,
+                      int enc) {
+  Context* context = static_cast<Context*>(
+      SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl)));
+  ContextImpl* ctx = context->context_impl_.get();
+
+  TicketKeyCallbackResult on_callback_result =
+    ctx->on_ticketkey_callback_(name, iv, enc != 0);
+  if (on_callback_result.result < 0) {
+    return on_callback_result.result;
+  }
+
+  HMAC_Init_ex(hctx,
+               on_callback_result.hmac,
+               on_callback_result.hmac_length,
+               EVP_sha256(),
+               nullptr);
+
+  const unsigned char* aes_key =
+      reinterpret_cast<unsigned char*>(on_callback_result.aes);
+  if (enc) {
+    EVP_EncryptInit_ex(ectx,
+                       EVP_aes_128_cbc(),
+                       nullptr,
+                       aes_key,
+                       iv);
+  } else {
+    EVP_DecryptInit_ex(ectx,
+                       EVP_aes_128_cbc(),
+                       nullptr,
+                       aes_key,
+                       iv);
+  }
+
+  return on_callback_result.result;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::EnableTicketCallback(
+    OnTicketKeyCallback on_ticketkey_callback) {
+  on_ticketkey_callback_ = on_ticketkey_callback;
+  SSL_CTX_set_app_data(ctx_.get(), this);
+  SSL_CTX_set_tlsext_ticket_key_cb(ctx_.get(), TicketKeyCallback);
+  return ContextStatus::Ok;
+}
+
+ContextStatus SecurityProvider::Context::ContextImpl::SetEngine(
+    std::string name, uint32_t flags) {
+  ClearErrorOnReturn clear_error_on_return;
+
+  // Load engine.
+  DeleteFnPtr<ENGINE, ENGINE_free_fn> engine(
+      LoadEngineById(name.c_str()));
+  if (!engine)
+    return ContextStatus::ENGINE_LOAD_ERROR;
+
+  int r = ENGINE_set_default(engine.get(), flags);
+  ENGINE_free(engine.get());
+  if (r == 0)
+    return ContextStatus::ENGINE_SET_ERROR;
+  return ContextStatus::Ok;
+}
+
+void SecurityProvider::Context::AddRootCerts() {
+  return context_impl_->AddRootCerts();
+}
+
+ContextStatus SecurityProvider::Context::SetCert(Cert* cert) {
+  return context_impl_->SetCert(cert, env_);
+}
+
+ContextStatus SecurityProvider::Context::SetKey(Key* key_data,
+                                                std::string passphrase,
+                                                bool has_passphrase) {
+  return context_impl_->SetKey(key_data, passphrase, has_passphrase, env_);
+}
+
+ContextStatus SecurityProvider::Context::SetCiphers(std::string ciphers) {
+  return context_impl_->SetCiphers(ciphers);
+}
+
+ContextStatus SecurityProvider::Context::AddCACert(Cert* cert_data) {
+  return context_impl_->AddCACert(cert_data, env_);
+}
+
+ContextStatus SecurityProvider::Context::AddCRL(Data* crl_data) {
+  return context_impl_->AddCRL(crl_data, env_);
+}
+
+ContextStatus SecurityProvider::Context::SetECDHCurve(std::string curve) {
+  return context_impl_->SetECDHCurve(curve);
+}
+
+ContextStatus SecurityProvider::Context::SetDHParam(Data* dh_data) {
+  return context_impl_->SetDHParam(dh_data, env_);
+}
+
+ContextStatus SecurityProvider::Context::SetOptions(int64_t val) {
+  return context_impl_->SetOptions(val);
+}
+
+ContextStatus SecurityProvider::Context::SetSessionContextId(
+    const unsigned char* id, unsigned int length) {
+  return context_impl_->SetSessionContextId(id, length);
+}
+
+ContextStatus SecurityProvider::Context::SetSessionTimeout(uint32_t timeout) {
+  return context_impl_->SetSessionTimeout(timeout);
+}
+
+ContextStatus SecurityProvider::Context::LoadPKCS12(Data* s,
+                                                    std::vector<char> pass) {
+  return context_impl_->LoadPKCS12(s, pass, env_);
+}
+
+ContextStatus SecurityProvider::Context::SetClientCertEngine(
+    std::string engine_id) {
+#ifndef OPENSSL_NO_ENGINE
+  return context_impl_->SetClientCertEngine(engine_id);
+#else
+  return ContextStatus:Ok;
+#endif
+}
+
+ContextStatus SecurityProvider::Context::GetCertificate(Cert* cert) {
+  return context_impl_->GetCertificate(cert);
+}
+
+ContextStatus SecurityProvider::Context::GetIssuerCertificate(Cert* cert) {
+  return context_impl_->GetIssuerCertificate(cert);
+}
+
+ContextStatus SecurityProvider::Context::SetTicketKey(TicketKey* key) {
+  return context_impl_->SetTicketKey(key);
+}
+
+TicketKey* SecurityProvider::Context::GetTicketKey() {
+  return context_impl_->GetTicketKey();
+}
+
+ContextStatus SecurityProvider::Context::EnableTicketCallback(
+    OnTicketKeyCallback callback) {
+  return context_impl_->EnableTicketCallback(callback);
+}
+
+ContextStatus SecurityProvider::Context::SetEngine(std::string name,
+                                                   uint32_t flags) {
+  return context_impl_->SetEngine(name, flags);
+}
 
 }  // namespace security
 

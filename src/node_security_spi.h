@@ -1,6 +1,7 @@
 #ifndef SRC_NODE_SECURITY_SPI_H_
 #define SRC_NODE_SECURITY_SPI_H_
 
+#include "env.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -114,10 +115,22 @@ class SecurityProvider {
                                size_t* out_len);
   };
 
+  class Data {
+   public:
+     const char* data_;
+     size_t length_;
+  };
+
   class Key {
    public:
-    char* data_;
-    size_t length_;
+     const char* data_;
+     size_t length_;
+  };
+
+  class Cert {
+   public:
+     const char* data_;
+     size_t length_;
   };
 
   class KeyPairGenerator {
@@ -218,6 +231,94 @@ class SecurityProvider {
     uint32_t param_encoding_;
   };
 
+  class TicketKey {
+   public:
+     unsigned char ticket_key_name_[16];
+     unsigned char ticket_key_aes_[16];
+     unsigned char ticket_key_hmac_[16];
+  };
+
+  class TicketKeyCallbackResult {
+   public:
+     unsigned char* name;
+     unsigned char* iv;
+     unsigned char* aes;
+     uint32_t aes_length;
+     unsigned char* hmac;
+     uint32_t hmac_length;
+     int result;
+  };
+
+  typedef std::function<TicketKeyCallbackResult(unsigned char* name,
+                             unsigned char* iv,
+                             bool b)> OnTicketKeyCallback;
+
+  class Context {
+   public:
+    enum class ContextStatus {
+      Ok,
+      MethodDisabled,
+      UnknownMethod,
+      TicketKeyError,
+      CertSourceError,
+      CertError,
+      PrivateKeySourceError,
+      PrivateKeyReadError,
+      PrivateKeyUsageError,
+      SetCiphersError,
+      CACertSourceError,
+      CRLSourceError,
+      CRLParseError,
+      ECDHSetError,
+      DHSourceError,
+      DH_PARAM_INVALID_LESS_THAN_1024,
+      DH_PARAM_INVALID_LESS_THAN_2048,
+      DH_PARAM_SET_ERROR,
+      SESSION_CONTEXT_ID_SET_ERROR,
+      PKCS12_SOURCE_ERROR,
+      PKCS12_LOAD_ERROR,
+      CLIENT_ENGINE_SET_ERROR,
+      CLIENT_ENGINE_LOAD_ERROR,
+      ENGINE_SET_ERROR,
+      ENGINE_LOAD_ERROR,
+      MALLOC_ERROR
+    };
+    explicit Context(Environment* env);
+    ~Context();
+    ContextStatus Init(int min_version, int max_version,
+                       std::string method_name);
+    void AddRootCerts();
+    ContextStatus SetCert(Cert* cert_data);
+    ContextStatus SetKey(Key* key_data,
+                         std::string passphrase,
+                         bool has_passphrase);
+    ContextStatus SetCiphers(std::string ciphers);
+    ContextStatus AddCACert(Cert* cert_data);
+    ContextStatus AddCRL(Data* crl_data);
+    ContextStatus SetECDHCurve(std::string curve);
+    ContextStatus SetDHParam(Data* dh_data);
+    ContextStatus SetOptions(int64_t val);
+    ContextStatus SetSessionContextId(const unsigned char* id,
+                                      unsigned int length);
+    ContextStatus SetSessionTimeout(uint32_t timeout);
+    ContextStatus LoadPKCS12(Data* something, std::vector<char> pass);
+    ContextStatus SetClientCertEngine(std::string engine_id);
+    ContextStatus GetCertificate(Cert* cert);
+    ContextStatus GetIssuerCertificate(Cert* cert);
+    ContextStatus SetTicketKey(TicketKey* key);
+    TicketKey* GetTicketKey();
+    ContextStatus EnableTicketCallback(OnTicketKeyCallback callback);
+    ContextStatus SetEngine(std::string name, uint32_t flags);
+    Environment* GetEnv() { return env_; }
+    const Context operator=(const Context&) = delete;
+    Context(const Context&) = delete;
+
+   private:
+     class ContextImpl;
+     std::unique_ptr<ContextImpl> context_impl_;
+     Environment* env_;
+  };
+
   static void Init();
   static void InitProviderOnce();
   static std::string GetProviderName();
@@ -228,6 +329,8 @@ class SecurityProvider {
   static std::vector<std::string> GetTLSCiphers();
   static std::vector<std::string> GetCurves();
   static std::vector<std::string> GetErrors();
+  static std::string GetErrorStr();
+  static std::string GetErrorStr(uint32_t id);
   static uint32_t GetError();
   static Status RandomBytes(size_t size, unsigned char* data);
   static bool VerifySpkac(const char* data, unsigned int len);
