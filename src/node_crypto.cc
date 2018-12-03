@@ -348,8 +348,8 @@ void SecureContext::Init(const FunctionCallbackInfo<Value>& args) {
   if (status != ContextStatus::Ok) {
     if (status == ContextStatus::MethodDisabled) {
       std::string error_msg = method_name + " methods disabled";
-      THROW_ERR_TLS_INVALID_PROTOCOL_METHOD(env, "SSLv2 methods disabled");
-      return;
+      return THROW_ERR_TLS_INVALID_PROTOCOL_METHOD(env,
+                                                   "SSLv2 methods disabled");
     }
   }
 }
