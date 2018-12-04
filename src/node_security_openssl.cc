@@ -74,6 +74,8 @@ using ContextStatus = SecurityProvider::Context::ContextStatus;
 using TicketKeyCallbackResult = SecurityProvider::TicketKeyCallbackResult;
 using TicketKey = SecurityProvider::TicketKey;
 using Hash = SecurityProvider::Hash;
+using SignBase = SecurityProvider::SignBase;
+using Sign = SecurityProvider::Sign;
 
 // Ensure that OpenSSL has enough entropy (at least 256 bits) for its PRNG.
 // The entropy pool starts out empty and needs to fill up before the PRNG
@@ -1052,6 +1054,213 @@ class SecurityProvider::Hash::HashImpl {
  private:
   EVPMDPointer mdctx_;
 };
+
+class SecurityProvider::SignBase::SignBaseImpl {
+ public:
+  SignBaseImpl() : mdctx_(nullptr) {}
+  ~SignBaseImpl() {}
+
+  Status Init(const char* sign_type);
+  Status Update(const char* data, int len);
+
+ protected:
+  friend SecurityProvider::Sign;
+  friend SecurityProvider::Verify;
+  EVPMDPointer mdctx_;
+};
+
+SecurityProvider::SignBase::SignBase() :
+    base_impl_(std::make_unique<SignBaseImpl>()) {}
+SecurityProvider::SignBase::~SignBase() {}
+
+
+SecurityProvider::Sign::Sign() : SignBase() {}
+SecurityProvider::Sign::~Sign() {}
+
+SecurityProvider::Verify::Verify() : SignBase() {}
+SecurityProvider::Verify::~Verify() {}
+
+SignBase::Status SecurityProvider::SignBase::SignBase::Update(const char* data,
+                                                              int len) {
+  return base_impl_->Update(data, len);
+}
+
+SignBase::Status SecurityProvider::SignBase::SignBaseImpl::Update(
+    const char* data, int len) {
+  if (mdctx_ == nullptr)
+    return Status::SignNotInitialised;
+  if (!EVP_DigestUpdate(mdctx_.get(), data, len))
+    return Status::SignUpdate;
+
+  return Status::SignOk;
+}
+
+SignBase::Status SecurityProvider::SignBase::SignBase::Init(
+    const char* sign_type) {
+  return base_impl_->Init(sign_type);
+}
+
+SignBase::Status SecurityProvider::SignBase::SignBaseImpl::Init(
+    const char* sign_type) {
+  CHECK_NULL(mdctx_);
+  // Historically, "dss1" and "DSS1" were DSA aliases for SHA-1
+  // exposed through the public API.
+  if (strcmp(sign_type, "dss1") == 0 ||
+      strcmp(sign_type, "DSS1") == 0) {
+    sign_type = "SHA1";
+  }
+  const EVP_MD* md = EVP_get_digestbyname(sign_type);
+  if (md == nullptr)
+    return Status::SignUnknownDigest;
+
+  mdctx_.reset(EVP_MD_CTX_new());
+  if (!mdctx_ || !EVP_DigestInit_ex(mdctx_.get(), md, nullptr)) {
+    mdctx_.reset();
+    return Status::SignInit;
+  }
+
+  return Status::SignOk;
+}
+
+static bool ApplyRSAOptions(const EVPKeyPointer& pkey,
+                            EVP_PKEY_CTX* pkctx,
+                            int padding,
+                            int salt_len) {
+  if (EVP_PKEY_id(pkey.get()) == EVP_PKEY_RSA ||
+      EVP_PKEY_id(pkey.get()) == EVP_PKEY_RSA2) {
+    if (EVP_PKEY_CTX_set_rsa_padding(pkctx, padding) <= 0)
+      return false;
+    if (padding == RSA_PKCS1_PSS_PADDING) {
+      if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, salt_len) <= 0)
+        return false;
+    }
+  }
+
+  return true;
+}
+
+static MallocedBuffer<unsigned char> Node_SignFinal(EVPMDPointer&& mdctx,
+                                                    const EVPKeyPointer& pkey,
+                                                    int padding,
+                                                    int pss_salt_len) {
+  unsigned char m[EVP_MAX_MD_SIZE];
+  unsigned int m_len;
+
+  if (!EVP_DigestFinal_ex(mdctx.get(), m, &m_len))
+    return MallocedBuffer<unsigned char>();
+
+  int signed_sig_len = EVP_PKEY_size(pkey.get());
+  CHECK_GE(signed_sig_len, 0);
+  size_t sig_len = static_cast<size_t>(signed_sig_len);
+  MallocedBuffer<unsigned char> sig(sig_len);
+
+  EVPKeyCtxPointer pkctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  if (pkctx &&
+      EVP_PKEY_sign_init(pkctx.get()) > 0 &&
+      ApplyRSAOptions(pkey, pkctx.get(), padding, pss_salt_len) &&
+      EVP_PKEY_CTX_set_signature_md(pkctx.get(),
+                                    EVP_MD_CTX_md(mdctx.get())) > 0 &&
+      EVP_PKEY_sign(pkctx.get(), sig.data, &sig_len, m, m_len) > 0) {
+    sig.Truncate(sig_len);
+    return sig;
+  }
+
+  return MallocedBuffer<unsigned char>();
+}
+
+Sign::SignResult SecurityProvider::Sign::SignFinal(
+    const char* key_pem,
+    int key_pem_len,
+    const char* passphrase,
+    int padding,
+    int saltlen) {
+
+  if (!base_impl_->mdctx_)
+    return SignResult(Status::SignNotInitialised);
+
+  EVPMDPointer mdctx = std::move(base_impl_->mdctx_);
+
+  BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem), key_pem_len));
+  if (!bp)
+    return SignResult(Status::SignPrivateKey);
+
+  EVPKeyPointer pkey(PEM_read_bio_PrivateKey(bp.get(),
+                                             nullptr,
+                                             PasswordCallback,
+                                             const_cast<char*>(passphrase)));
+
+  // Errors might be injected into OpenSSL's error stack
+  // without `pkey` being set to nullptr;
+  // cf. the test of `test_bad_rsa_privkey.pem` for an example.
+  if (!pkey || 0 != ERR_peek_error())
+    return SignResult(Status::SignPrivateKey);
+
+#ifdef NODE_FIPS_MODE
+  /* Validate DSA2 parameters from FIPS 186-4 */
+  if (FIPS_mode() && EVP_PKEY_DSA == pkey->type) {
+    size_t L = BN_num_bits(pkey->pkey.dsa->p);
+    size_t N = BN_num_bits(pkey->pkey.dsa->q);
+    bool result = false;
+
+    if (L == 1024 && N == 160)
+      result = true;
+    else if (L == 2048 && N == 224)
+      result = true;
+    else if (L == 2048 && N == 256)
+      result = true;
+    else if (L == 3072 && N == 256)
+      result = true;
+
+    if (!result) {
+      return Status::SignPrivateKey;
+    }
+  }
+#endif  // NODE_FIPS_MODE
+
+  MallocedBuffer<unsigned char> buffer =
+      Node_SignFinal(std::move(mdctx), pkey, padding, saltlen);
+  Status status = buffer.is_empty() ? Status::SignPrivateKey : Status::SignOk;
+  return SignResult(status, std::move(buffer));
+}
+
+SignBase::Status SecurityProvider::Verify::VerifyFinal(const char* key_pem,
+                                                       int key_pem_len,
+                                                       const char* sig,
+                                                       int siglen,
+                                                       int padding,
+                                                       int saltlen,
+                                                       bool* verify_result) {
+  if (!base_impl_->mdctx_)
+    return Status::SignNotInitialised;
+
+  EVPKeyPointer pkey;
+  unsigned char m[EVP_MAX_MD_SIZE];
+  unsigned int m_len;
+  *verify_result = false;
+  EVPMDPointer mdctx = std::move(base_impl_->mdctx_);
+
+  if (ParsePublicKey(&pkey, key_pem, key_pem_len) != kParsePublicOk)
+    return Status::SignPublicKey;
+
+  if (!EVP_DigestFinal_ex(mdctx.get(), m, &m_len))
+    return Status::SignPublicKey;
+
+  EVPKeyCtxPointer pkctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
+  if (pkctx &&
+      EVP_PKEY_verify_init(pkctx.get()) > 0 &&
+      ApplyRSAOptions(pkey, pkctx.get(), padding, saltlen) &&
+      EVP_PKEY_CTX_set_signature_md(pkctx.get(),
+                                    EVP_MD_CTX_md(mdctx.get())) > 0) {
+    const int r = EVP_PKEY_verify(pkctx.get(),
+                                  reinterpret_cast<const unsigned char*>(sig),
+                                  siglen,
+                                  m,
+                                  m_len);
+    *verify_result = r == 1;
+  }
+
+  return Status::SignOk;
+}
 
 SecurityProvider::Hash::Hash(Environment* env) :
     hash_impl_(std::make_unique<HashImpl>()), env_(env) {}

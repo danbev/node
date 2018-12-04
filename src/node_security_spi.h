@@ -339,6 +339,60 @@ class SecurityProvider {
      Environment* env_;
   };
 
+  class SignBase {
+   public:
+    enum class Status {
+      SignOk,
+      SignUnknownDigest,
+      SignInit,
+      SignNotInitialised,
+      SignUpdate,
+      SignPrivateKey,
+      SignPublicKey
+    };
+    SignBase();
+    ~SignBase();
+    Status Init(const char* sign_type);
+    Status Update(const char* data, int len);
+
+   protected:
+     class SignBaseImpl;
+     std::unique_ptr<SignBaseImpl> base_impl_;
+  };
+
+  class Sign : public SignBase {
+   public:
+    struct SignResult {
+      Status status_;
+      MallocedBuffer<unsigned char> signature_;
+
+      explicit SignResult(
+          Status status,
+          MallocedBuffer<unsigned char>&& sig = MallocedBuffer<unsigned char>())
+        : status_(status), signature_(std::move(sig)) {}
+    };
+    Sign();
+    ~Sign();
+    SignResult SignFinal(const char* key_pem,
+                         int key_pem_len,
+                         const char* passphrase,
+                         int padding,
+                         int saltlen);
+  };
+
+  class Verify : public SignBase {
+   public:
+    Verify();
+    ~Verify();
+    Status VerifyFinal(const char* key_pem,
+                       int key_pem_len,
+                       const char* sig,
+                       int siglen,
+                       int padding,
+                       int saltlen,
+                       bool* verify_result);
+  };
+
   static void Init();
   static void InitProviderOnce();
   static std::string GetProviderName();

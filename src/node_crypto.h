@@ -490,8 +490,8 @@ class SignBase : public BaseObject {
   } Error;
 
   SignBase(Environment* env, v8::Local<v8::Object> wrap)
-      : BaseObject(env, wrap) {
-  }
+      : BaseObject(env, wrap) { }
+  virtual ~SignBase() {}
 
   Error Init(const char* sign_type);
   Error Update(const char* data, int len);
@@ -502,7 +502,8 @@ class SignBase : public BaseObject {
   SET_SELF_SIZE(SignBase)
 
  protected:
-  void CheckThrow(Error error);
+  void CheckThrow(security::SecurityProvider::SignBase::Status status);
+  virtual security::SecurityProvider::SignBase* Base() = 0;
 
   EVPMDPointer mdctx_;
 };
@@ -521,45 +522,42 @@ class Sign : public SignBase {
       : error(err), signature(std::move(sig)) {}
   };
 
-  SignResult SignFinal(
-      const char* key_pem,
-      int key_pem_len,
-      const char* passphrase,
-      int padding,
-      int saltlen);
-
  protected:
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void SignInit(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void SignUpdate(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void SignFinal(const v8::FunctionCallbackInfo<v8::Value>& args);
+  security::SecurityProvider::SignBase* Base() {
+    return sign_.get();
+  }
+  std::unique_ptr<security::SecurityProvider::Sign> sign_;
 
-  Sign(Environment* env, v8::Local<v8::Object> wrap) : SignBase(env, wrap) {
+  Sign(Environment* env, v8::Local<v8::Object> wrap) : SignBase(env, wrap),
+      sign_(std::make_unique<security::SecurityProvider::Sign>()) {
     MakeWeak();
   }
+  ~Sign() {}
 };
 
 class Verify : public SignBase {
  public:
   static void Initialize(Environment* env, v8::Local<v8::Object> target);
 
-  Error VerifyFinal(const char* key_pem,
-                    int key_pem_len,
-                    const char* sig,
-                    int siglen,
-                    int padding,
-                    int saltlen,
-                    bool* verify_result);
-
  protected:
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void VerifyInit(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void VerifyUpdate(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void VerifyFinal(const v8::FunctionCallbackInfo<v8::Value>& args);
+  std::unique_ptr<security::SecurityProvider::Verify> verify_;
+  security::SecurityProvider::SignBase* Base() {
+    return verify_.get();
+  }
 
-  Verify(Environment* env, v8::Local<v8::Object> wrap) : SignBase(env, wrap) {
+  Verify(Environment* env, v8::Local<v8::Object> wrap) : SignBase(env, wrap),
+      verify_(std::make_unique<security::SecurityProvider::Verify>()) {
     MakeWeak();
   }
+  ~Verify() {}
 };
 
 class PublicKeyCipher {

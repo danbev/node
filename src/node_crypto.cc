@@ -163,18 +163,6 @@ template int SSLWrap<TLSWrap>::SelectALPNCallback(
     void* arg);
 
 
-static int PasswordCallback(char* buf, int size, int rwflag, void* u) {
-  if (u) {
-    size_t buflen = static_cast<size_t>(size);
-    size_t len = strlen(static_cast<const char*>(u));
-    len = len > buflen ? buflen : len;
-    memcpy(buf, u, len);
-    return len;
-  }
-
-  return 0;
-}
-
 // This callback is used to avoid the default passphrase callback in OpenSSL
 // which will typically prompt for the passphrase. The prompting is designed
 // for the OpenSSL CLI, but works poorly for Node.js because it involves
@@ -3095,20 +3083,18 @@ void Hash::HashDigest(const FunctionCallbackInfo<Value>& args) {
 
 
 SignBase::Error SignBase::Init(const char* sign_type) {
-  CHECK_NULL(mdctx_);
+  CHECK_NULL(Base());
   // Historically, "dss1" and "DSS1" were DSA aliases for SHA-1
   // exposed through the public API.
   if (strcmp(sign_type, "dss1") == 0 ||
       strcmp(sign_type, "DSS1") == 0) {
     sign_type = "SHA1";
   }
-  const EVP_MD* md = EVP_get_digestbyname(sign_type);
-  if (md == nullptr)
+  SecurityProvider::SignBase::Status status = Base()->Init(sign_type);
+  if (status == SecurityProvider::SignBase::Status::SignUnknownDigest) {
     return kSignUnknownDigest;
-
-  mdctx_.reset(EVP_MD_CTX_new());
-  if (!mdctx_ || !EVP_DigestInit_ex(mdctx_.get(), md, nullptr)) {
-    mdctx_.reset();
+  }
+  if (status == SecurityProvider::SignBase::Status::SignInit) {
     return kSignInit;
   }
 
@@ -3117,51 +3103,56 @@ SignBase::Error SignBase::Init(const char* sign_type) {
 
 
 SignBase::Error SignBase::Update(const char* data, int len) {
-  if (mdctx_ == nullptr)
+  SecurityProvider::SignBase::Status status = Base()->Update(data, len);
+  if (status == SecurityProvider::SignBase::Status::SignNotInitialised) {
     return kSignNotInitialised;
-  if (!EVP_DigestUpdate(mdctx_.get(), data, len))
+  }
+  if (status == SecurityProvider::SignBase::Status::SignUpdate) {
     return kSignUpdate;
+  }
   return kSignOk;
 }
 
 
-void SignBase::CheckThrow(SignBase::Error error) {
+void SignBase::CheckThrow(SecurityProvider::SignBase::Status status) {
+  using Status = SecurityProvider::SignBase::Status;
   HandleScope scope(env()->isolate());
 
-  switch (error) {
-    case kSignUnknownDigest:
+  switch (status) {
+    case Status::SignUnknownDigest:
       return env()->ThrowError("Unknown message digest");
 
-    case kSignNotInitialised:
+    case Status::SignNotInitialised:
       return env()->ThrowError("Not initialised");
 
-    case kSignInit:
-    case kSignUpdate:
-    case kSignPrivateKey:
-    case kSignPublicKey:
+    case Status::SignInit:
+    case Status::SignUpdate:
+    case Status::SignPrivateKey:
+    case Status::SignPublicKey:
       {
-        unsigned long err = ERR_get_error();  // NOLINT(runtime/int)
+        // NOLINTNEXTLINE(runtime/int)
+        unsigned long err = SecurityProvider::GetError();
         if (err)
           return ThrowCryptoError(env(), err);
-        switch (error) {
-          case kSignInit:
+        switch (status) {
+          case Status::SignInit:
             return env()->ThrowError("EVP_SignInit_ex failed");
-          case kSignUpdate:
+          case Status::SignUpdate:
             return env()->ThrowError("EVP_SignUpdate failed");
-          case kSignPrivateKey:
+          case Status::SignPrivateKey:
             return env()->ThrowError("PEM_read_bio_PrivateKey failed");
-          case kSignPublicKey:
+          case Status::SignPublicKey:
             return env()->ThrowError("PEM_read_bio_PUBKEY failed");
           default:
             ABORT();
         }
       }
 
-    case kSignOk:
+    case Status::SignOk:
       return;
   }
 }
-
+/*
 static bool ApplyRSAOptions(const EVPKeyPointer& pkey,
                             EVP_PKEY_CTX* pkctx,
                             int padding,
@@ -3178,6 +3169,7 @@ static bool ApplyRSAOptions(const EVPKeyPointer& pkey,
 
   return true;
 }
+*/
 
 
 
@@ -3207,7 +3199,7 @@ void Sign::SignInit(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&sign, args.Holder());
 
   const node::Utf8Value sign_type(args.GetIsolate(), args[0]);
-  sign->CheckThrow(sign->Init(*sign_type));
+  sign->CheckThrow(sign->Base()->Init(*sign_type));
 }
 
 
@@ -3215,97 +3207,13 @@ void Sign::SignUpdate(const FunctionCallbackInfo<Value>& args) {
   Sign* sign;
   ASSIGN_OR_RETURN_UNWRAP(&sign, args.Holder());
 
-  Error err;
+  SecurityProvider::Sign::Status status;
   char* buf = Buffer::Data(args[0]);
   size_t buflen = Buffer::Length(args[0]);
-  err = sign->Update(buf, buflen);
+  status = sign->Base()->Update(buf, buflen);
 
-  sign->CheckThrow(err);
+  sign->CheckThrow(status);
 }
-
-static MallocedBuffer<unsigned char> Node_SignFinal(EVPMDPointer&& mdctx,
-                                                    const EVPKeyPointer& pkey,
-                                                    int padding,
-                                                    int pss_salt_len) {
-  unsigned char m[EVP_MAX_MD_SIZE];
-  unsigned int m_len;
-
-  if (!EVP_DigestFinal_ex(mdctx.get(), m, &m_len))
-    return MallocedBuffer<unsigned char>();
-
-  int signed_sig_len = EVP_PKEY_size(pkey.get());
-  CHECK_GE(signed_sig_len, 0);
-  size_t sig_len = static_cast<size_t>(signed_sig_len);
-  MallocedBuffer<unsigned char> sig(sig_len);
-
-  EVPKeyCtxPointer pkctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
-  if (pkctx &&
-      EVP_PKEY_sign_init(pkctx.get()) > 0 &&
-      ApplyRSAOptions(pkey, pkctx.get(), padding, pss_salt_len) &&
-      EVP_PKEY_CTX_set_signature_md(pkctx.get(),
-                                    EVP_MD_CTX_md(mdctx.get())) > 0 &&
-      EVP_PKEY_sign(pkctx.get(), sig.data, &sig_len, m, m_len) > 0) {
-    sig.Truncate(sig_len);
-    return sig;
-  }
-
-  return MallocedBuffer<unsigned char>();
-}
-
-Sign::SignResult Sign::SignFinal(
-    const char* key_pem,
-    int key_pem_len,
-    const char* passphrase,
-    int padding,
-    int salt_len) {
-  if (!mdctx_)
-    return SignResult(kSignNotInitialised);
-
-  EVPMDPointer mdctx = std::move(mdctx_);
-
-  BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem), key_pem_len));
-  if (!bp)
-    return SignResult(kSignPrivateKey);
-
-  EVPKeyPointer pkey(PEM_read_bio_PrivateKey(bp.get(),
-                                             nullptr,
-                                             PasswordCallback,
-                                             const_cast<char*>(passphrase)));
-
-  // Errors might be injected into OpenSSL's error stack
-  // without `pkey` being set to nullptr;
-  // cf. the test of `test_bad_rsa_privkey.pem` for an example.
-  if (!pkey || 0 != ERR_peek_error())
-    return SignResult(kSignPrivateKey);
-
-#ifdef NODE_FIPS_MODE
-  /* Validate DSA2 parameters from FIPS 186-4 */
-  if (FIPS_mode() && EVP_PKEY_DSA == pkey->type) {
-    size_t L = BN_num_bits(pkey->pkey.dsa->p);
-    size_t N = BN_num_bits(pkey->pkey.dsa->q);
-    bool result = false;
-
-    if (L == 1024 && N == 160)
-      result = true;
-    else if (L == 2048 && N == 224)
-      result = true;
-    else if (L == 2048 && N == 256)
-      result = true;
-    else if (L == 3072 && N == 256)
-      result = true;
-
-    if (!result) {
-      return kSignPrivateKey;
-    }
-  }
-#endif  // NODE_FIPS_MODE
-
-  MallocedBuffer<unsigned char> buffer =
-      Node_SignFinal(std::move(mdctx), pkey, padding, salt_len);
-  Error error = buffer.is_empty() ? kSignPrivateKey : kSignOk;
-  return SignResult(error, std::move(buffer));
-}
-
 
 void Sign::SignFinal(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
@@ -3328,18 +3236,18 @@ void Sign::SignFinal(const FunctionCallbackInfo<Value>& args) {
 
   ClearErrorOnReturn clear_error_on_return;
 
-  SignResult ret = sign->SignFinal(
+  SecurityProvider::Sign::SignResult ret = sign->sign_->SignFinal(
       buf,
       buf_len,
       len >= 2 && !args[1]->IsNull() ? *passphrase : nullptr,
       padding,
       salt_len);
 
-  if (ret.error != kSignOk)
-    return sign->CheckThrow(ret.error);
+  if (ret.status_ != SecurityProvider::Sign::Status::SignOk)
+    return sign->CheckThrow(ret.status_);
 
   MallocedBuffer<unsigned char> sig =
-      std::move(ret.signature);
+      std::move(ret.signature_);
 
   Local<Object> rc =
       Buffer::New(env, reinterpret_cast<char*>(sig.release()), sig.size)
@@ -3347,71 +3255,6 @@ void Sign::SignFinal(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(rc);
 }
 
-enum ParsePublicKeyResult {
-  kParsePublicOk,
-  kParsePublicNotRecognized,
-  kParsePublicFailed
-};
-
-static ParsePublicKeyResult TryParsePublicKey(
-    EVPKeyPointer* pkey,
-    const BIOPointer& bp,
-    const char* name,
-    // NOLINTNEXTLINE(runtime/int)
-    std::function<EVP_PKEY*(const unsigned char** p, long l)> parse) {
-  unsigned char* der_data;
-  long der_len;  // NOLINT(runtime/int)
-
-  // This skips surrounding data and decodes PEM to DER.
-  {
-    MarkPopErrorOnReturn mark_pop_error_on_return;
-    if (PEM_bytes_read_bio(&der_data, &der_len, nullptr, name,
-                           bp.get(), nullptr, nullptr) != 1)
-      return kParsePublicNotRecognized;
-  }
-
-  // OpenSSL might modify the pointer, so we need to make a copy before parsing.
-  const unsigned char* p = der_data;
-  pkey->reset(parse(&p, der_len));
-  OPENSSL_clear_free(der_data, der_len);
-
-  return *pkey ? kParsePublicOk : kParsePublicFailed;
-}
-
-static ParsePublicKeyResult ParsePublicKey(EVPKeyPointer* pkey,
-                                           const char* key_pem,
-                                           int key_pem_len) {
-  BIOPointer bp(BIO_new_mem_buf(const_cast<char*>(key_pem), key_pem_len));
-  if (!bp)
-    return kParsePublicFailed;
-
-  ParsePublicKeyResult ret;
-
-  // Try PKCS#8 first.
-  ret = TryParsePublicKey(pkey, bp, "PUBLIC KEY",
-      [](const unsigned char** p, long l) {  // NOLINT(runtime/int)
-        return d2i_PUBKEY(nullptr, p, l);
-      });
-  if (ret != kParsePublicNotRecognized)
-    return ret;
-
-  // Maybe it is PKCS#1.
-  CHECK(BIO_reset(bp.get()));
-  ret = TryParsePublicKey(pkey, bp, "RSA PUBLIC KEY",
-      [](const unsigned char** p, long l) {  // NOLINT(runtime/int)
-        return d2i_PublicKey(EVP_PKEY_RSA, nullptr, p, l);
-      });
-  if (ret != kParsePublicNotRecognized)
-    return ret;
-
-  // X.509 fallback.
-  CHECK(BIO_reset(bp.get()));
-  return TryParsePublicKey(pkey, bp, "CERTIFICATE",
-      [](const unsigned char** p, long l) {  // NOLINT(runtime/int)
-        X509Pointer x509(d2i_X509(nullptr, p, l));
-        return x509 ? X509_get_pubkey(x509.get()) : nullptr;
-      });
-}
 
 void Verify::Initialize(Environment* env, Local<Object> target) {
   Local<FunctionTemplate> t = env->NewFunctionTemplate(New);
@@ -3439,7 +3282,7 @@ void Verify::VerifyInit(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&verify, args.Holder());
 
   const node::Utf8Value verify_type(args.GetIsolate(), args[0]);
-  verify->CheckThrow(verify->Init(*verify_type));
+  verify->CheckThrow(verify->verify_->Init(*verify_type));
 }
 
 
@@ -3447,52 +3290,12 @@ void Verify::VerifyUpdate(const FunctionCallbackInfo<Value>& args) {
   Verify* verify;
   ASSIGN_OR_RETURN_UNWRAP(&verify, args.Holder());
 
-  Error err;
+  SecurityProvider::SignBase::Status status;
   char* buf = Buffer::Data(args[0]);
   size_t buflen = Buffer::Length(args[0]);
-  err = verify->Update(buf, buflen);
+  status = verify->verify_->Update(buf, buflen);
 
-  verify->CheckThrow(err);
-}
-
-
-SignBase::Error Verify::VerifyFinal(const char* key_pem,
-                                    int key_pem_len,
-                                    const char* sig,
-                                    int siglen,
-                                    int padding,
-                                    int saltlen,
-                                    bool* verify_result) {
-  if (!mdctx_)
-    return kSignNotInitialised;
-
-  EVPKeyPointer pkey;
-  unsigned char m[EVP_MAX_MD_SIZE];
-  unsigned int m_len;
-  *verify_result = false;
-  EVPMDPointer mdctx = std::move(mdctx_);
-
-  if (ParsePublicKey(&pkey, key_pem, key_pem_len) != kParsePublicOk)
-    return kSignPublicKey;
-
-  if (!EVP_DigestFinal_ex(mdctx.get(), m, &m_len))
-    return kSignPublicKey;
-
-  EVPKeyCtxPointer pkctx(EVP_PKEY_CTX_new(pkey.get(), nullptr));
-  if (pkctx &&
-      EVP_PKEY_verify_init(pkctx.get()) > 0 &&
-      ApplyRSAOptions(pkey, pkctx.get(), padding, saltlen) &&
-      EVP_PKEY_CTX_set_signature_md(pkctx.get(),
-                                    EVP_MD_CTX_md(mdctx.get())) > 0) {
-    const int r = EVP_PKEY_verify(pkctx.get(),
-                                  reinterpret_cast<const unsigned char*>(sig),
-                                  siglen,
-                                  m,
-                                  m_len);
-    *verify_result = r == 1;
-  }
-
-  return kSignOk;
+  verify->CheckThrow(status);
 }
 
 
@@ -3515,10 +3318,10 @@ void Verify::VerifyFinal(const FunctionCallbackInfo<Value>& args) {
   int salt_len = args[3].As<Int32>()->Value();
 
   bool verify_result;
-  Error err = verify->VerifyFinal(kbuf, klen, hbuf, hlen, padding, salt_len,
-                                  &verify_result);
-  if (err != kSignOk)
-    return verify->CheckThrow(err);
+  SecurityProvider::SignBase::Status status = verify->verify_->VerifyFinal(
+      kbuf, klen, hbuf, hlen, padding, salt_len, &verify_result);
+  if (status != SecurityProvider::SignBase::Status::SignOk)
+    return verify->CheckThrow(status);
   args.GetReturnValue().Set(verify_result);
 }
 
