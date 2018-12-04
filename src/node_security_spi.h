@@ -319,6 +319,26 @@ class SecurityProvider {
      Environment* env_;
   };
 
+  class Hash {
+   public:
+    enum class Status {
+      Ok,
+      DigestNotFound,
+      DigestInitError,
+      HashNotAvailable
+    };
+    explicit Hash(Environment* env);
+    ~Hash();
+    Status Init(const char* hash_type);
+    Status Update(const char* data, int len);
+    Status Digest(unsigned char* data, unsigned int* len);
+
+   private:
+     class HashImpl;
+     std::unique_ptr<HashImpl> hash_impl_;
+     Environment* env_;
+  };
+
   static void Init();
   static void InitProviderOnce();
   static std::string GetProviderName();

@@ -456,14 +456,14 @@ class Hmac : public BaseObject {
 class Hash : public BaseObject {
  public:
   static void Initialize(Environment* env, v8::Local<v8::Object> target);
+  // TODO(danbev) make this a private property perhaps, but be consistent
+  // and also update SecureContext
+  std::unique_ptr<security::SecurityProvider::Hash> hash_;
 
   // TODO(joyeecheung): track the memory used by OpenSSL types
   SET_NO_MEMORY_INFO()
   SET_MEMORY_INFO_NAME(Hash)
   SET_SELF_SIZE(Hash)
-
-  bool HashInit(const char* hash_type);
-  bool HashUpdate(const char* data, int len);
 
  protected:
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -472,12 +472,9 @@ class Hash : public BaseObject {
 
   Hash(Environment* env, v8::Local<v8::Object> wrap)
       : BaseObject(env, wrap),
-        mdctx_(nullptr) {
+        hash_(std::make_unique<security::SecurityProvider::Hash>(env)) {
     MakeWeak();
   }
-
- private:
-  EVPMDPointer mdctx_;
 };
 
 class SignBase : public BaseObject {

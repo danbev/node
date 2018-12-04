@@ -3029,31 +3029,11 @@ void Hash::New(const FunctionCallbackInfo<Value>& args) {
   const node::Utf8Value hash_type(env->isolate(), args[0]);
 
   Hash* hash = new Hash(env, args.This());
-  if (!hash->HashInit(*hash_type)) {
+  SecurityProvider::Hash::Status status = hash->hash_->Init(*hash_type);
+  if (status != SecurityProvider::Hash::Status::Ok) {
     return ThrowCryptoError(env, ERR_get_error(),
                             "Digest method not supported");
   }
-}
-
-
-bool Hash::HashInit(const char* hash_type) {
-  const EVP_MD* md = EVP_get_digestbyname(hash_type);
-  if (md == nullptr)
-    return false;
-  mdctx_.reset(EVP_MD_CTX_new());
-  if (!mdctx_ || EVP_DigestInit_ex(mdctx_.get(), md, nullptr) <= 0) {
-    mdctx_.reset();
-    return false;
-  }
-  return true;
-}
-
-
-bool Hash::HashUpdate(const char* data, int len) {
-  if (!mdctx_)
-    return false;
-  EVP_DigestUpdate(mdctx_.get(), data, len);
-  return true;
 }
 
 
@@ -3064,7 +3044,7 @@ void Hash::HashUpdate(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&hash, args.Holder());
 
   // Only copy the data if we have to, because it's a string
-  bool r = true;
+  SecurityProvider::Hash::Status status = SecurityProvider::Hash::Status::Ok;
   if (args[0]->IsString()) {
     StringBytes::InlineDecoder decoder;
     if (!decoder.Decode(env, args[0].As<String>(), args[1], UTF8)
@@ -3072,14 +3052,14 @@ void Hash::HashUpdate(const FunctionCallbackInfo<Value>& args) {
       args.GetReturnValue().Set(false);
       return;
     }
-    r = hash->HashUpdate(decoder.out(), decoder.size());
+    status = hash->hash_->Update(decoder.out(), decoder.size());
   } else if (args[0]->IsArrayBufferView()) {
     char* buf = Buffer::Data(args[0]);
     size_t buflen = Buffer::Length(args[0]);
-    r = hash->HashUpdate(buf, buflen);
+    status = hash->hash_->Update(buf, buflen);
   }
 
-  args.GetReturnValue().Set(r);
+  args.GetReturnValue().Set(status == SecurityProvider::Hash::Status::Ok);
 }
 
 
@@ -3094,10 +3074,9 @@ void Hash::HashDigest(const FunctionCallbackInfo<Value>& args) {
     encoding = ParseEncoding(env->isolate(), args[0], BUFFER);
   }
 
-  unsigned char md_value[EVP_MAX_MD_SIZE];
+  unsigned char md_value[64];
   unsigned int md_len;
-
-  EVP_DigestFinal_ex(hash->mdctx_.get(), md_value, &md_len);
+  hash->hash_->Digest(md_value, &md_len);
 
   Local<Value> error;
   MaybeLocal<Value> rc =

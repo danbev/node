@@ -73,6 +73,7 @@ using StackOfX509 = std::unique_ptr<STACK_OF(X509), StackOfX509Deleter>;
 using ContextStatus = SecurityProvider::Context::ContextStatus;
 using TicketKeyCallbackResult = SecurityProvider::TicketKeyCallbackResult;
 using TicketKey = SecurityProvider::TicketKey;
+using Hash = SecurityProvider::Hash;
 
 // Ensure that OpenSSL has enough entropy (at least 256 bits) for its PRNG.
 // The entropy pool starts out empty and needs to fill up before the PRNG
@@ -1037,6 +1038,67 @@ class SecurityProvider::Context::ContextImpl {
   TicketKey ticket_key_;
   OnTicketKeyCallback on_ticketkey_callback_;
 };
+
+class SecurityProvider::Hash::HashImpl {
+ public:
+  HashImpl() : mdctx_(nullptr) {}
+  ~HashImpl() {}
+
+  Status Init(const char* hash_type);
+  Status Update(const char* data, int len);
+  Status Digest(const char* data, int len);
+  Status Digest(unsigned char* data, unsigned int* len);
+
+ private:
+  EVPMDPointer mdctx_;
+};
+
+SecurityProvider::Hash::Hash(Environment* env) :
+    hash_impl_(std::make_unique<HashImpl>()), env_(env) {}
+SecurityProvider::Hash::~Hash() {}
+
+Hash::Status SecurityProvider::Hash::HashImpl::Init(const char* hash_type) {
+  const EVP_MD* md = EVP_get_digestbyname(hash_type);
+  if (md == nullptr)
+    return Status::DigestNotFound;
+
+  mdctx_.reset(EVP_MD_CTX_new());
+  if (!mdctx_ || EVP_DigestInit_ex(mdctx_.get(), md, nullptr) <= 0) {
+    mdctx_.reset();
+    return Status::DigestInitError;
+  }
+  return Status::Ok;
+}
+
+Hash::Status SecurityProvider::Hash::HashImpl::Update(const char* data,
+                                                      int len) {
+  if (!mdctx_)
+    return Status::HashNotAvailable;
+
+  EVP_DigestUpdate(mdctx_.get(), data, len);
+  return Status::Ok;
+}
+
+Hash::Status SecurityProvider::Hash::HashImpl::Digest(unsigned char* out,
+                                                      unsigned int* len) {
+  unsigned char md_value[EVP_MAX_MD_SIZE];
+  EVP_DigestFinal_ex(mdctx_.get(), md_value, len);
+  out = md_value;
+  return Status::Ok;
+}
+
+Hash::Status SecurityProvider::Hash::Hash::Init(const char* hash_type) {
+  return hash_impl_->Init(hash_type);
+}
+
+Hash::Status SecurityProvider::Hash::Hash::Update(const char* data, int len) {
+  return hash_impl_->Update(data, len);
+}
+
+Hash::Status SecurityProvider::Hash::Hash::Digest(unsigned char* data,
+                                                  unsigned int* len) {
+  return hash_impl_->Digest(data, len);
+}
 
 SecurityProvider::Context::Context(Environment* env)
   : context_impl_(std::make_unique<ContextImpl>()), env_(env) {}
