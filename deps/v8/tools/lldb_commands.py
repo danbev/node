@@ -28,7 +28,6 @@ def ptr_arg_cmd(debugger, name, param, cmd):
   if not param:
     print("'{}' requires an argument".format(name))
     return
-  param = '(void*)({})'.format(param)
   no_arg_cmd(debugger, cmd.format(param))
 
 #####################
