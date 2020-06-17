@@ -30,7 +30,7 @@ const crypto = require('crypto');
 function test() {
   const odd = Buffer.alloc(39, 'A');
 
-  const c = crypto.createDiffieHellman(32);
+  const c = crypto.createDiffieHellman(1024);
   c.setPrivateKey(odd);
   c.generateKeys();
 }

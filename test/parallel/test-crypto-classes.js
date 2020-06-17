@@ -24,7 +24,7 @@ const TEST_CASES = {
 if (!common.hasFipsCrypto) {
   TEST_CASES.Cipher = ['aes192', 'secret'];
   TEST_CASES.Decipher = ['aes192', 'secret'];
-  TEST_CASES.DiffieHellman = [256];
+  TEST_CASES.DiffieHellman = [1024];
 }
 
 for (const [clazz, args] of Object.entries(TEST_CASES)) {

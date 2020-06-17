@@ -12,7 +12,7 @@ const crypto = require('crypto');
 
 const before = process.memoryUsage().rss;
 {
-  const dh = crypto.createDiffieHellman(common.hasFipsCrypto ? 1024 : 256);
+  const dh = crypto.createDiffieHellman(1024);
   const publicKey = dh.generateKeys();
   const privateKey = dh.getPrivateKey();
   for (let i = 0; i < 5e4; i += 1) {
