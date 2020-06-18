@@ -34,5 +34,7 @@ function decrypt(key) {
 }
 
 decrypt(pkey);
-assert.throws(() => decrypt(pkeyEncrypted), { code: 'ERR_MISSING_PASSPHRASE' });
+assert.throws(() => decrypt(pkeyEncrypted), { code: common.hasOpenSSL3 ?
+  'ERR_OSSL_OSSL_STORE_UI_PROCESS_INTERRUPTED_OR_CANCELLED' :
+  'ERR_MISSING_PASSPHRASE' });
 decrypt(pkey);  // Should not throw.
