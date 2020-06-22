@@ -211,7 +211,12 @@ const privateDsa = fixtures.readKey('dsa_private_encrypted_1025.pem',
   // This should not cause a crash: https://github.com/nodejs/node/issues/25247
   assert.throws(() => {
     createPrivateKey({ key: '' });
-  }, {
+  }, common.hasOpenSSL3 ? {
+    message: 'error:20000073:BIO routines::null parameter',
+    code: 'ERR_OSSL_BIO_NULL_PARAMETER',
+    reason: 'null parameter',
+    library: 'BIO routines',
+  } : {
     message: 'error:2007E073:BIO routines:BIO_new_mem_buf:null parameter',
     code: 'ERR_OSSL_BIO_NULL_PARAMETER',
     reason: 'null parameter',
@@ -280,7 +285,12 @@ const privateDsa = fixtures.readKey('dsa_private_encrypted_1025.pem',
 
 {
   // Reading an encrypted key without a passphrase should fail.
-  assert.throws(() => createPrivateKey(privateDsa), {
+  assert.throws(() => createPrivateKey(privateDsa), common.hasOpenSSL3 ? {
+    name: 'Error',
+    code: 'ERR_OSSL_OSSL_STORE_UI_PROCESS_INTERRUPTED_OR_CANCELLED',
+    message: 'error:2C00006D:STORE routines::' +
+      'ui process interrupted or cancelled'
+  } : {
     name: 'TypeError',
     code: 'ERR_MISSING_PASSPHRASE',
     message: 'Passphrase required for encrypted key'
@@ -293,7 +303,9 @@ const privateDsa = fixtures.readKey('dsa_private_encrypted_1025.pem',
     format: 'pem',
     passphrase: Buffer.alloc(1025, 'a')
   }), {
-    code: 'ERR_OSSL_PEM_BAD_PASSWORD_READ',
+    code: common.hasOpenSSL3 ?
+      'ERR_OSSL_OSSL_STORE_UI_PROCESS_INTERRUPTED_OR_CANCELLED' :
+      'ERR_OSSL_PEM_BAD_PASSWORD_READ',
     name: 'Error'
   });
 
@@ -304,7 +316,9 @@ const privateDsa = fixtures.readKey('dsa_private_encrypted_1025.pem',
     format: 'pem',
     passphrase: Buffer.alloc(1024, 'a')
   }), {
-    message: /bad decrypt/
+    message: common.hasOpenSSL3 ?
+      'error:2C00006D:STORE routines::ui process interrupted or cancelled' :
+      /bad decrypt/
   });
 
   const publicKey = createPublicKey(publicDsa);
