@@ -11,6 +11,9 @@
 #if !defined(_MSC_VER)
 #include <unistd.h>  // setuid, getuid
 #endif
+#ifdef __linux__
+#include <sys/capability.h>
+#endif  // __linux__
 
 namespace node {
 
@@ -33,11 +36,48 @@ bool linux_at_secure = false;
 
 namespace credentials {
 
-// Look up environment variable unless running as setuid root.
+#if defined(__linux__)
+// Returns true if the current process only has the passed-in capability.
+bool HasOnly(cap_value_t capability) {
+  DCHECK(cap_valid(capability));
+
+  cap_t cap = cap_get_proc();
+  if (cap == nullptr) {
+    return false;
+  }
+
+  // Create a cap_t and set the capability passed in.
+  cap_t cap_cmp = cap_init();
+  if (cap_cmp == nullptr) {
+    cap_free(cap);
+    return false;
+  }
+  cap_value_t cap_list[] = { capability };
+  cap_set_flag(cap_cmp, CAP_EFFECTIVE, 1, cap_list, CAP_SET);
+  cap_set_flag(cap_cmp, CAP_PERMITTED, 1, cap_list, CAP_SET);
+  // Compare this to the process's effective capabilities
+  bool ret = cap_compare(cap, cap_cmp) == 0;
+
+  cap_free(cap);
+  cap_free(cap_cmp);
+
+  return ret;
+}
+#endif
+
+// Look up the environment variable and allow the lookup if the current
+// process only has the capability CAP_NET_BIND_SERVICE set. If the current
+// process does not have any capabilities set and the process is running as
+// setuid root then lookup will not be allowed.
 bool SafeGetenv(const char* key, std::string* text, Environment* env) {
 #if !defined(__CloudABI__) && !defined(_WIN32)
+#if defined(__linux__)
+  if ((!HasOnly(CAP_NET_BIND_SERVICE) && per_process::linux_at_secure) ||
+      getuid() != geteuid() || getgid() != getegid())
+#else
   if (per_process::linux_at_secure || getuid() != geteuid() ||
       getgid() != getegid())
+#endif
     goto fail;
 #endif
 

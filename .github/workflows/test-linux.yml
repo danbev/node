@@ -25,6 +25,8 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Environment Information
         run: npx envinfo
+      - name: Install libcap-dev
+        run: sudo apt-get install -y libcap-dev
       - name: Build
         run: make build-ci -j2 V=1 CONFIG_FLAGS="--error-on-warn"
       - name: Test

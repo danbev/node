@@ -373,6 +373,9 @@
         'cflags': [ '-pthread' ],
         'ldflags': [ '-pthread' ],
       }],
+      [ 'OS in "linux"', {
+        'ldflags': [ '-Wl,-Bstatic -Wl,--whole-archive -lcap -Wl,--no-whole-archive -Wl,-Bdynamic' ],
+      }],
       [ 'OS in "linux freebsd openbsd solaris android aix cloudabi"', {
         'cflags': [ '-Wall', '-Wextra', '-Wno-unused-parameter', ],
         'cflags_cc': [ '-fno-rtti', '-fno-exceptions', '-std=gnu++1y' ],

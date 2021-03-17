@@ -34,6 +34,8 @@ jobs:
         run: npx envinfo
       - name: Install gcovr
         run: pip install gcovr==4.2
+      - name: Install libcap-dev
+        run: sudo apt-get install -y libcap-dev
       - name: Build
         run: make build-ci -j2 V=1 CONFIG_FLAGS="--error-on-warn --coverage"
       # TODO(bcoe): fix the couple tests that fail with the inspector enabled.

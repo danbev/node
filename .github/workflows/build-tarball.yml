@@ -25,6 +25,8 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Environment Information
         run: npx envinfo
+      - name: Install libcap-dev
+        run: sudo apt-get install -y libcap-dev
       - name: Make tarball
         run: |
           export DISTTYPE=nightly
@@ -51,6 +53,8 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Environment Information
         run: npx envinfo
+      - name: Install libcap-dev
+        run: sudo apt-get install -y libcap-dev
       - name: Download tarball
         uses: actions/download-artifact@v1
         with:
